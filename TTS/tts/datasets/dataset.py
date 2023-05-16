@@ -257,9 +257,10 @@ class TTSDataset(Dataset):
         token_ids = self.get_token_ids(idx, item["text"])
 
         # get pre-computed attention maps
-        attn = None
         if "alignment_file" in item:
             attn = self.get_attn_mask(item["alignment_file"])
+        else:
+            attn = None
 
         # after phonemization the text length may change
         # this is a shareful 🤭 hack to prevent longer phonemes

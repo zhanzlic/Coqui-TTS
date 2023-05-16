@@ -133,16 +133,47 @@ def load_tts_samples(
                 meta_data_eval, meta_data_train = split_dataset(meta_data_train, eval_size_per_dataset, eval_split_size)
             meta_data_eval_all += meta_data_eval
         meta_data_train_all += meta_data_train
+        
         # load attention masks for the duration predictor training
         if dataset.meta_file_attn_mask:
-            meta_data = dict(load_attention_mask_meta_data(dataset["meta_file_attn_mask"]))
+            
+            fn = Path(dataset["meta_file_attn_mask"])
+            if not fn.exists():
+                fn = Path(root_path) / fn
+
+            assert fn.exists(), f" [!] Cannot find/open attention metafile \"{dataset['meta_file_attn_mask']}\""
+
+            meta_data = dict(load_attention_mask_meta_data(fn))
+            
             for idx, ins in enumerate(meta_data_train_all):
-                attn_file = meta_data[ins["audio_file"]].strip()
-                meta_data_train_all[idx].update({"alignment_file": attn_file})
+                
+                # ZHa: loading attention mask by the utterance name or by the full wave filename
+                attn_file = None
+                if ins["audio_file"] in meta_data:
+                    attn_file = meta_data[ins["audio_file"]].strip()
+                elif ins["utt_name"] in meta_data:
+                    attn_file = meta_data[ins["utt_name"]].strip()
+
+                if attn_file:
+                    meta_data_train_all[idx].update({"alignment_file": attn_file})
+                else:
+                    pass # no attention file found (may be created during the training process)
+
             if meta_data_eval_all:
                 for idx, ins in enumerate(meta_data_eval_all):
-                    attn_file = meta_data[ins["audio_file"]].strip()
-                    meta_data_eval_all[idx].update({"alignment_file": attn_file})
+                    
+                    # ZHa: loading attention mask by the utterance name or by the full wave filename
+                    attn_file = None
+                    if ins["audio_file"] in meta_data:
+                        attn_file = meta_data[ins["audio_file"]].strip()
+                    elif ins["utt_name"] in meta_data:
+                        attn_file = meta_data[ins["utt_name"]].strip()
+
+                    if attn_file:
+                        meta_data_eval_all[idx].update({"alignment_file": attn_file})
+                    else:
+                        pass # no attention file found (may be created during the training process)
+
         # set none for the next iter
         formatter = None
     return meta_data_train_all, meta_data_eval_all

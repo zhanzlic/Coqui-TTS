@@ -100,7 +100,6 @@ def wav_to_spec(y, n_fft, hop_length, win_length, center=False):
     Return Shapes:
         - spec : :math:`[B,C,T]`
     """
-    y = y.squeeze(1)
 
     if torch.min(y) < -1.0:
         print("min value is ", torch.min(y))
@@ -112,12 +111,9 @@ def wav_to_spec(y, n_fft, hop_length, win_length, center=False):
     wnsize_dtype_device = str(win_length) + "_" + dtype_device
     if wnsize_dtype_device not in hann_window:
         hann_window[wnsize_dtype_device] = torch.hann_window(win_length).to(dtype=y.dtype, device=y.device)
-
-    y = torch.nn.functional.pad(
-        y.unsqueeze(1),
-        (int((n_fft - hop_length) / 2), int((n_fft - hop_length) / 2)),
-        mode="reflect",
-    )
+    
+    pad_size = int((n_fft - hop_length) / 2)
+    y = torch.nn.functional.pad(y, (pad_size, pad_size), mode="reflect")
     y = y.squeeze(1)
 
     spec = torch.stft(
@@ -126,7 +122,7 @@ def wav_to_spec(y, n_fft, hop_length, win_length, center=False):
         hop_length=hop_length,
         win_length=win_length,
         window=hann_window[wnsize_dtype_device],
-        center=center,
+        center=False,
         pad_mode="reflect",
         normalized=False,
         onesided=True,
@@ -164,7 +160,6 @@ def wav_to_mel(y, n_fft, num_mels, sample_rate, hop_length, win_length, fmin, fm
     Return Shapes:
         - spec : :math:`[B,C,T]`
     """
-    y = y.squeeze(1)
 
     if torch.min(y) < -1.0:
         print("min value is ", torch.min(y))
@@ -181,11 +176,8 @@ def wav_to_mel(y, n_fft, num_mels, sample_rate, hop_length, win_length, fmin, fm
     if wnsize_dtype_device not in hann_window:
         hann_window[wnsize_dtype_device] = torch.hann_window(win_length).to(dtype=y.dtype, device=y.device)
 
-    y = torch.nn.functional.pad(
-        y.unsqueeze(1),
-        (int((n_fft - hop_length) / 2), int((n_fft - hop_length) / 2)),
-        mode="reflect",
-    )
+    pad_size = int((n_fft - hop_length) / 2)
+    y = torch.nn.functional.pad(y, (pad_size, pad_size), mode="reflect")
     y = y.squeeze(1)
 
     spec = torch.stft(
@@ -194,11 +186,11 @@ def wav_to_mel(y, n_fft, num_mels, sample_rate, hop_length, win_length, fmin, fm
         hop_length=hop_length,
         win_length=win_length,
         window=hann_window[wnsize_dtype_device],
-        center=center,
+        center=False,
         pad_mode="reflect",
         normalized=False,
         onesided=True,
-        return_complex=False,
+        return_complex=False
     )
 
     spec = torch.sqrt(spec.pow(2).sum(-1) + 1e-6)
@@ -268,7 +260,6 @@ class VitsDataset(TTSDataset):
                 wav = wav[:, : -int(wav.size(1) % self.model_args.encoder_sample_rate)]
 
         wav_filename = os.path.basename(item["audio_file"])
-
         token_ids = self.get_token_ids(idx, item["text"])
 
         # after phonemization the text length may change
@@ -278,7 +269,7 @@ class VitsDataset(TTSDataset):
             self.rescue_item_idx += 1
             return self.__getitem__(self.rescue_item_idx)
 
-        return {
+        output_item = {
             "raw_text": raw_text,
             "token_ids": token_ids,
             "token_len": len(token_ids),
@@ -288,6 +279,12 @@ class VitsDataset(TTSDataset):
             "language_name": item["language"],
             "audio_unique_name": item["audio_unique_name"],
         }
+
+        # ZHa: attention mask / alignment
+        if "alignment_file" in item:
+            output_item["attn"] = self.get_attn_mask(item["alignment_file"])
+
+        return output_item
 
     @property
     def lengths(self):
@@ -310,7 +307,7 @@ class VitsDataset(TTSDataset):
             - speaker_names: :math:`[B]`
             - language_names: :math:`[B]`
             - audiofile_paths: :math:`[B]`
-            - raw_texts: :math:`[B]`
+            - raw_text: :math:`[B]`
             - audio_unique_names: :math:`[B]`
         """
         # convert list of dicts to dict of lists
@@ -334,6 +331,7 @@ class VitsDataset(TTSDataset):
         wav_padded = torch.FloatTensor(B, 1, wav_lens_max)
         token_padded = token_padded.zero_() + self.pad_id
         wav_padded = wav_padded.zero_() + self.pad_id
+
         for i in range(len(ids_sorted_decreasing)):
             token_ids = batch["token_ids"][i]
             token_padded[i, : batch["token_len"][i]] = torch.LongTensor(token_ids)
@@ -341,7 +339,11 @@ class VitsDataset(TTSDataset):
             wav = batch["wav"][i]
             wav_padded[i, :, : wav.size(1)] = torch.FloatTensor(wav)
 
-        return {
+            #print(batch["audio_unique_name"][i])
+            #print(batch["raw_text"][i])
+            #print(batch["attn"][i].shape)
+
+        output_batch = {
             "tokens": token_padded,
             "token_lens": token_lens,
             "token_rel_lens": token_rel_lens,
@@ -354,6 +356,22 @@ class VitsDataset(TTSDataset):
             "raw_text": batch["raw_text"],
             "audio_unique_names": batch["audio_unique_name"],
         }
+
+        # ZHa: build attention matrices
+        if "attn" in batch:
+            n_rows = torch.LongTensor([attn.shape[0] for attn in batch["attn"]])  # number of units
+            n_cols = torch.LongTensor([attn.shape[1] for attn in batch["attn"]])  # number of frames
+            max_rows = torch.max(n_rows)
+            max_cols = torch.max(n_cols)
+
+            attn_padded = torch.FloatTensor(B, max_rows, max_cols)
+            attn_padded = attn_padded.zero_()
+            for i in range(B):
+                attn_padded[i, : n_rows[i], : n_cols[i]] = torch.FloatTensor(batch["attn"][i])
+
+            output_batch["attn"] = attn_padded
+
+        return output_batch
 
 
 ##############################
@@ -631,7 +649,7 @@ class Vits(BaseTTS):
         self,
         config: Coqpit,
         ap: "AudioProcessor" = None,
-        tokenizer: "TTSTokenizer" = None,
+        tokenizer: TTSTokenizer = None,
         speaker_manager: SpeakerManager = None,
         language_manager: LanguageManager = None,
     ):
@@ -905,20 +923,27 @@ class Vits(BaseTTS):
         g = speaker_ids if speaker_ids is not None else d_vectors
         return g
 
-    def forward_mas(self, outputs, z_p, m_p, logs_p, x, x_mask, y_mask, g, lang_emb):
-        # find the alignment path
-        attn_mask = torch.unsqueeze(x_mask, -1) * torch.unsqueeze(y_mask, 2)
-        with torch.no_grad():
-            o_scale = torch.exp(-2 * logs_p)
-            logp1 = torch.sum(-0.5 * math.log(2 * math.pi) - logs_p, [1]).unsqueeze(-1)  # [b, t, 1]
-            logp2 = torch.einsum("klm, kln -> kmn", [o_scale, -0.5 * (z_p**2)])
-            logp3 = torch.einsum("klm, kln -> kmn", [m_p * o_scale, z_p])
-            logp4 = torch.sum(-0.5 * (m_p**2) * o_scale, [1]).unsqueeze(-1)  # [b, t, 1]
-            logp = logp2 + logp3 + logp1 + logp4
-            attn = maximum_path(logp, attn_mask.squeeze(1)).unsqueeze(1).detach()  # [b, 1, t, t']
+    def forward_mas(self, outputs, z_p, m_p, logs_p, x, x_mask, y_mask, g, lang_emb, attn=None):
+        
+        # find the alignment path when it is not given
+        if attn is None:
+        #if True:
+            attn_mask = torch.unsqueeze(x_mask, -1) * torch.unsqueeze(y_mask, 2)
+            with torch.no_grad():
+                o_scale = torch.exp(-2 * logs_p)
+                logp1 = torch.sum(-0.5 * math.log(2 * math.pi) - logs_p, [1]).unsqueeze(-1)  # [b, t, 1]
+                logp2 = torch.einsum("klm, kln -> kmn", [o_scale, -0.5 * (z_p**2)])
+                logp3 = torch.einsum("klm, kln -> kmn", [m_p * o_scale, z_p])
+                logp4 = torch.sum(-0.5 * (m_p**2) * o_scale, [1]).unsqueeze(-1)  # [b, t, 1]
+                logp = logp2 + logp3 + logp1 + logp4
+                attn2 = maximum_path(logp, attn_mask.squeeze(1)).unsqueeze(1).detach()  # [b, 1, t, t']
+
+        #print("loaded attn", attn.size())
+        #print("calculated attn", attn2.size())
 
         # duration predictor
         attn_durations = attn.sum(3)
+
         if self.args.use_sdp:
             loss_duration = self.duration_predictor(
                 x.detach() if self.args.detach_dp_input else x,
@@ -964,7 +989,7 @@ class Vits(BaseTTS):
         y: torch.tensor,
         y_lengths: torch.tensor,
         waveform: torch.tensor,
-        aux_input={"d_vectors": None, "speaker_ids": None, "language_ids": None},
+        aux_input={"d_vectors": None, "speaker_ids": None, "language_ids": None, "attn": None},
     ) -> Dict:
         """Forward pass of the model.
 
@@ -975,7 +1000,7 @@ class Vits(BaseTTS):
             y_lengths (torch.tensor): Batch of input spectrogram lengths.
             waveform (torch.tensor): Batch of ground truth waveforms per sample.
             aux_input (dict, optional): Auxiliary inputs for multi-speaker and multi-lingual training.
-                Defaults to {"d_vectors": None, "speaker_ids": None, "language_ids": None}.
+                Defaults to {"d_vectors": None, "speaker_ids": None, "language_ids": None, "attn": None}.
 
         Returns:
             Dict: model outputs keyed by the output name.
@@ -1005,6 +1030,7 @@ class Vits(BaseTTS):
         """
         outputs = {}
         sid, g, lid, _ = self._set_cond_input(aux_input)
+
         # speaker embedding
         if self.args.use_speaker_embedding and sid is not None:
             g = self.emb_g(sid).unsqueeze(-1)  # [b, h, 1]
@@ -1022,8 +1048,15 @@ class Vits(BaseTTS):
         # flow layers
         z_p = self.flow(z, y_mask, g=g)
 
+        if "attn" in aux_input:
+            attn = aux_input["attn"]
+            if attn.ndim == 3:
+                attn = attn.unsqueeze_(1)
+        else:
+            attn = None
+
         # duration predictor
-        outputs, attn = self.forward_mas(outputs, z_p, m_p, logs_p, x, x_mask, y_mask, g=g, lang_emb=lang_emb)
+        outputs, attn = self.forward_mas(outputs, z_p, m_p, logs_p, x, x_mask, y_mask, g=g, lang_emb=lang_emb, attn=attn)
 
         # expand prior
         m_p = torch.einsum("klmn, kjm -> kjn", [attn, m_p])
@@ -1083,12 +1116,48 @@ class Vits(BaseTTS):
         if "x_lengths" in aux_input and aux_input["x_lengths"] is not None:
             return aux_input["x_lengths"]
         return torch.tensor(x.shape[1:2]).to(x.device)
+    
+    # JMa: set minimum duration if predicted duration is lower than threshold
+    # Workaround to avoid short durations that cause some chars/phonemes to be reduced
+    # @staticmethod
+    # def _set_min_inference_length(d, threshold):
+    #     d_mask = d < threshold
+    #     d[d_mask] = threshold
+    #     return d
+    
+    def _set_min_inference_length(self, x, durs, threshold):
+        punctlike = list(self.config.characters.punctuations) + [self.config.characters.blank]
+        # Get list of tokens from IDs
+        tokens = x.squeeze().tolist()
+        # Check current and next token
+        n = self.tokenizer.characters.id_to_char(tokens[0])
+        # for ix, (c, n) in enumerate(zip(tokens[:-1], tokens[1:])):
+        for ix, idx in enumerate(tokens[1:]):
+            # c = self.tokenizer.characters.id_to_char(id_c)
+            c = n
+            n = self.tokenizer.characters.id_to_char(idx)
+            if c in punctlike:
+                # Skip thresholding for punctuation
+                continue
+            # Add duration from next punctuation if possible
+            d = durs[:,:,ix] + durs[:,:,ix+1] if n in punctlike else durs[:,:,ix]
+            # Threshold duration if duration lower than threshold
+            if d < threshold:
+                durs[:,:,ix] = threshold
+        return durs
 
     @torch.no_grad()
     def inference(
         self,
         x,
-        aux_input={"x_lengths": None, "d_vectors": None, "speaker_ids": None, "language_ids": None, "durations": None},
+        aux_input={"x_lengths": None,
+                   "d_vectors": None,
+                   "speaker_ids": None,
+                   "language_ids": None,
+                   "durations": None,
+                   "length_scale": 1.0,     # JMa: add `length_scale`` to `aux_input` to enable changing length (duration) per each input text (sentence)
+                   "min_input_length": 0    # JMa: set minimum length if predicted length is lower than `min_input_length`
+                  },
     ):  # pylint: disable=dangerous-default-value
         """
         Note:
@@ -1108,6 +1177,9 @@ class Vits(BaseTTS):
             - m_p: :math:`[B, C, T_dec]`
             - logs_p: :math:`[B, C, T_dec]`
         """
+        # JMa: Save input
+        x_input = x
+
         sid, g, lid, durations = self._set_cond_input(aux_input)
         x_lengths = self._set_x_lengths(x, aux_input)
 
@@ -1136,7 +1208,13 @@ class Vits(BaseTTS):
                 logw = self.duration_predictor(
                     x, x_mask, g=g if self.args.condition_dp_on_speaker else None, lang_emb=lang_emb
                 )
-            w = torch.exp(logw) * x_mask * self.length_scale
+            # JMa: set minimum duration if required
+            # w = self._set_min_inference_length(torch.exp(logw) * x_mask, aux_input["min_input_length"]) if aux_input["min_input_length"] else torch.exp(logw) * x_mask
+            w = self._set_min_inference_length(x_input, torch.exp(logw) * x_mask, aux_input["min_input_length"]) if aux_input.get("min_input_length", 0) else torch.exp(logw) * x_mask
+            # JMa: length scale for the given sentence-like input
+            length_scale = aux_input.get("length_scale", self.length_scale)
+            w *= length_scale
+            # w = torch.exp(logw) * x_mask * length_scale
         else:
             assert durations.shape[-1] == x.shape[-1]
             w = durations.unsqueeze(0)
@@ -1189,8 +1267,7 @@ class Vits(BaseTTS):
             reference_wav,
             self.config.audio.fft_size,
             self.config.audio.hop_length,
-            self.config.audio.win_length,
-            center=False,
+            self.config.audio.win_length
         )
         y_lengths = torch.tensor([y.size(-1)]).to(y.device)
         speaker_cond_src = reference_speaker_id if reference_speaker_id is not None else reference_d_vector
@@ -1250,6 +1327,10 @@ class Vits(BaseTTS):
             language_ids = batch["language_ids"]
             waveform = batch["waveform"]
 
+            aux_input = {"d_vectors": d_vectors, "speaker_ids": speaker_ids, "language_ids": language_ids}
+            if "attn" in batch:
+                aux_input["attn"] = batch["attn"]
+
             # generator pass
             outputs = self.forward(
                 tokens,
@@ -1257,7 +1338,7 @@ class Vits(BaseTTS):
                 spec,
                 spec_lens,
                 waveform,
-                aux_input={"d_vectors": d_vectors, "speaker_ids": speaker_ids, "language_ids": language_ids},
+                aux_input=aux_input,
             )
 
             # cache tensors for the generator pass
@@ -1297,8 +1378,7 @@ class Vits(BaseTTS):
                     hop_length=self.config.audio.hop_length,
                     win_length=self.config.audio.win_length,
                     fmin=self.config.audio.mel_fmin,
-                    fmax=self.config.audio.mel_fmax,
-                    center=False,
+                    fmax=self.config.audio.mel_fmax
                 )
 
             # compute discriminator scores and features
@@ -1438,7 +1518,8 @@ class Vits(BaseTTS):
         test_sentences = self.config.test_sentences
         for idx, s_info in enumerate(test_sentences):
             aux_inputs = self.get_aux_input_from_test_sentences(s_info)
-            wav, alignment, _, _ = synthesis(
+            # JMa: replace individual variables with dictionary
+            outputs = synthesis(
                 self,
                 aux_inputs["text"],
                 self.config,
@@ -1449,9 +1530,9 @@ class Vits(BaseTTS):
                 language_id=aux_inputs["language_id"],
                 use_griffin_lim=True,
                 do_trim_silence=False,
-            ).values()
-            test_audios["{}-audio".format(idx)] = wav
-            test_figures["{}-alignment".format(idx)] = plot_alignment(alignment.T, output_fig=False)
+            )
+            test_audios["{}-audio".format(idx)] = outputs["wav"]
+            test_figures["{}-alignment".format(idx)] = plot_alignment(outputs["alignments"].T, output_fig=False)
         return {"figures": test_figures, "audios": test_audios}
 
     def test_log(
@@ -1501,11 +1582,11 @@ class Vits(BaseTTS):
             wav = batch["waveform"]
 
         # compute spectrograms
-        batch["spec"] = wav_to_spec(wav, ac.fft_size, ac.hop_length, ac.win_length, center=False)
+        batch["spec"] = wav_to_spec(wav, ac.fft_size, ac.hop_length, ac.win_length)
 
         if self.args.encoder_sample_rate:
             # recompute spec with high sampling rate to the loss
-            spec_mel = wav_to_spec(batch["waveform"], ac.fft_size, ac.hop_length, ac.win_length, center=False)
+            spec_mel = wav_to_spec(batch["waveform"], ac.fft_size, ac.hop_length, ac.win_length)
             # remove extra stft frames if needed
             if spec_mel.size(2) > int(batch["spec"].size(2) * self.interpolate_factor):
                 spec_mel = spec_mel[:, :, : int(batch["spec"].size(2) * self.interpolate_factor)]
@@ -1530,9 +1611,13 @@ class Vits(BaseTTS):
         else:
             assert batch["spec"].shape[2] == batch["mel"].shape[2], f"{batch['spec'].shape[2]}, {batch['mel'].shape[2]}"
 
-        # compute spectrogram frame lengths
-        batch["spec_lens"] = (batch["spec"].shape[2] * batch["waveform_rel_lens"]).int()
-        batch["mel_lens"] = (batch["mel"].shape[2] * batch["waveform_rel_lens"]).int()
+        # compute/estimate spectrogram frame lengths
+        # batch["spec_lens"] = (batch["spec"].shape[2] * batch["waveform_rel_lens"]).int()
+        # batch["mel_lens"] = (batch["mel"].shape[2] * batch["waveform_rel_lens"]).int()
+
+        # ZHa: compute spectrogram frame lengths
+        batch["spec_lens"] = (batch["waveform_lens"] / ac.hop_length).int()
+        batch["mel_lens"] = (batch["waveform_lens"] / ac.hop_length).int()
 
         if self.args.encoder_sample_rate:
             assert (batch["spec_lens"] - (batch["mel_lens"] / self.interpolate_factor).int()).sum() == 0
