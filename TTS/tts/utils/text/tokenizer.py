@@ -113,6 +113,9 @@ class TTSTokenizer:
         if self.use_eos_bos:
             text = self.pad_with_bos_eos(text)
         return self.encode(text)
+    
+    def tokens_to_ids(self, tokens: List[str]) -> List[int]:  # pylint: disable=unused-argument
+        return self.encode(tokens)
 
     def ids_to_text(self, id_sequence: List[int]) -> str:
         """Converts a sequence of token IDs to a string of text."""

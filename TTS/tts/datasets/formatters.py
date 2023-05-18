@@ -627,6 +627,38 @@ def artic(root_path, meta_file, **kwargs):  # pylint: disable=unused-argument
     return items
 
 
+def artic_ipa(root_path, meta_file, **kwargs):  # pylint: disable=unused-argument
+    """Normalizes the ARTIC meta data file to TTS format
+    
+    Args:
+        root_path (str): path to the artic dataset
+        meta_file (str): name of the meta file containing names of wav to select and
+                         transcripts of the corresponding utterances
+    
+    Returns:
+        List[Dict[str]]: List of (utt_name, text, wav_path, speaker_name, language, root_path) associated with each utterance
+    """
+    txt_file = os.path.join(root_path, meta_file)
+    items = []
+    # Speaker name is the name of the directory with the data (last part of `root_path`)
+    speaker_name = os.path.basename(os.path.normpath(root_path))
+    # Speaker name can consists of language code (eg. cs-CZ) and gender (m/f) separated by dots
+    # Example: AndJa.cs-CZ.m
+    parts = speaker_name.split(".")
+    lang = parts[1] if len(parts) == 3 and "-" in parts[1] else None
+    print(f" > ARTIC dataset: voice {parts[0]}, language {lang}")
+    with open(txt_file, "r", encoding="utf-8") as ttf:
+        for line in ttf:
+            # Split according to standard separator
+            cols = line.strip().split("|", maxsplit=1)
+            # utterance name is stored in `cols[0]` and text in `cols[1]`
+            utt_name = cols[0]
+            wav_file = os.path.join(root_path, "wavs", utt_name + ".wav")
+            text = cols[1].split("|")
+            items.append({"utt_name": utt_name, "text": text, "audio_file": wav_file, "speaker_name": speaker_name, "language": lang, "root_path": root_path})
+    return items
+
+
 def artic_multispeaker(root_path, meta_file, ignored_speakers=None): # pylint: disable=unused-argument
     """Normalizes the ARTIC multi-speaker meta data files to TTS format
 
