@@ -654,7 +654,7 @@ def artic_ipa(root_path, meta_file, **kwargs):  # pylint: disable=unused-argumen
             # utterance name is stored in `cols[0]` and text in `cols[1]`
             utt_name = cols[0]
             wav_file = os.path.join(root_path, "wavs", utt_name + ".wav")
-            text = cols[1].split("|")
+            text = cols[1]
             items.append({"utt_name": utt_name, "text": text, "audio_file": wav_file, "speaker_name": speaker_name, "language": lang, "root_path": root_path})
     return items
 

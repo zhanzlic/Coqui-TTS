@@ -238,7 +238,7 @@ class TTSDataset(Dataset):
     def get_token_ids(self, idx, text):
         # ZHa: input is given as token list
         if isinstance(text, list):
-            token_ids = self.tokenizer.tokens_to_ids(text)
+            token_ids = self.tokenizer.text_to_ids(text)
         elif self.tokenizer.use_phonemes:
             token_ids = self.get_phonemes(idx, text)["token_ids"]
         else:

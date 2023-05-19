@@ -168,3 +168,9 @@ def no_cleaners(text):
     """JMa: Basic pipeline that only collapses whitespace. No lowercase is done!"""
     text = collapse_whitespace(text)
     return text
+
+def ipa_cleaners(text):
+    """ZHa: Basic pipeline collapses whitespace and split to tokens."""
+    text = collapse_whitespace(text)
+    tokens = text.split("|")
+    return tokens
