@@ -1,5 +1,5 @@
 from dataclasses import asdict, dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Union
 
 from coqpit import Coqpit, check_argument
 
@@ -145,8 +145,8 @@ class CharactersConfig(Coqpit):
     eos: str = None
     bos: str = None
     blank: str = None
-    characters: str = None
-    punctuations: str = None
+    characters: Union[list,str] = None  # ZHa: characters and punctuations can be defined by one string or in a list
+    punctuations: Union[list,str] = None
     phonemes: str = None
     is_unique: bool = True  # for backwards compatibility of models trained with char sets with duplicates
     is_sorted: bool = True
