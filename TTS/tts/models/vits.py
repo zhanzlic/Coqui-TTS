@@ -927,7 +927,6 @@ class Vits(BaseTTS):
         
         # find the alignment path when it is not given
         if attn is None:
-        #if True:
             attn_mask = torch.unsqueeze(x_mask, -1) * torch.unsqueeze(y_mask, 2)
             with torch.no_grad():
                 o_scale = torch.exp(-2 * logs_p)
@@ -936,7 +935,7 @@ class Vits(BaseTTS):
                 logp3 = torch.einsum("klm, kln -> kmn", [m_p * o_scale, z_p])
                 logp4 = torch.sum(-0.5 * (m_p**2) * o_scale, [1]).unsqueeze(-1)  # [b, t, 1]
                 logp = logp2 + logp3 + logp1 + logp4
-                attn2 = maximum_path(logp, attn_mask.squeeze(1)).unsqueeze(1).detach()  # [b, 1, t, t']
+                attn = maximum_path(logp, attn_mask.squeeze(1)).unsqueeze(1).detach()  # [b, 1, t, t']
 
         #print("loaded attn", attn.size())
         #print("calculated attn", attn2.size())
