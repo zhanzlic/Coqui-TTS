@@ -285,6 +285,10 @@ class VitsDataset(TTSDataset):
         if "alignment_file" in item:
             output_item["attn"] = self.get_attn_mask(item["alignment_file"])
 
+        # ZHa: duration
+        if "duration" in item:
+            output_item["duration"] = item["duration"]
+
         return output_item
 
     @property
@@ -295,6 +299,37 @@ class VitsDataset(TTSDataset):
             audio_len = os.path.getsize(wav_file) / 16 * 8  # assuming 16bit audio
             lens.append(audio_len)
         return lens
+    
+
+    def duration_to_attn_matrix(self, durations):
+        n_units = durations.shape[0]
+        n_frames = int(durations.sum())
+        frame_beg = 0
+        
+        attn_mask = torch.zeros([n_units, n_frames])
+        for idx, dur in enumerate(durations):
+            if dur > 0:
+                index = torch.tensor(range(frame_beg, frame_beg + dur))
+                attn_mask[idx].index_fill_(0, index, 1)
+                frame_beg += dur
+
+        return attn_mask
+    
+
+    def pad_attn_batch(self, attn_batch):
+        batch_size = len(attn_batch)
+        n_rows = torch.LongTensor([attn.shape[0] for attn in attn_batch])  # number of units
+        n_cols = torch.LongTensor([attn.shape[1] for attn in attn_batch])  # number of frames
+        max_rows = torch.max(n_rows)
+        max_cols = torch.max(n_cols)
+
+        attn_padded = torch.FloatTensor(batch_size, max_rows, max_cols)
+        attn_padded = attn_padded.zero_()
+        for i in range(batch_size):
+            attn_padded[i, : n_rows[i], : n_cols[i]] = torch.FloatTensor(attn_batch[i])
+
+        return attn_padded
+    
 
     def collate_fn(self, batch):
         """
@@ -340,10 +375,6 @@ class VitsDataset(TTSDataset):
             wav = batch["wav"][i]
             wav_padded[i, :, : wav.size(1)] = torch.FloatTensor(wav)
 
-            #print(batch["audio_unique_name"][i])
-            #print(batch["raw_text"][i])
-            #print(batch["attn"][i].shape)
-
         output_batch = {
             "tokens": token_padded,
             "token_lens": token_lens,
@@ -360,17 +391,21 @@ class VitsDataset(TTSDataset):
 
         # ZHa: build attention matrices
         if "attn" in batch:
-            n_rows = torch.LongTensor([attn.shape[0] for attn in batch["attn"]])  # number of units
-            n_cols = torch.LongTensor([attn.shape[1] for attn in batch["attn"]])  # number of frames
-            max_rows = torch.max(n_rows)
-            max_cols = torch.max(n_cols)
+            output_batch["attn"] = self.pad_attn_batch(batch["attn"])
 
-            attn_padded = torch.FloatTensor(B, max_rows, max_cols)
-            attn_padded = attn_padded.zero_()
-            for i in range(B):
-                attn_padded[i, : n_rows[i], : n_cols[i]] = torch.FloatTensor(batch["attn"][i])
+        # ZHa: pad duration vectors
+        if "duration" in batch:
+            duration_padded = torch.FloatTensor(B, max_text_len)
+            duration_padded = duration_padded.zero_()
+            for i in range(len(ids_sorted_decreasing)):
+                duration_padded[i, : batch["token_len"][i]] = torch.FloatTensor(batch["duration"][i])
 
-            output_batch["attn"] = attn_padded
+            output_batch["duration"] = duration_padded
+
+            # build attention matrix from duration
+            if "attn" not in output_batch:
+                attn_batch = [ self.duration_to_attn_matrix(torch.LongTensor(batch["duration"][i])) for i in range(B) ]
+                output_batch["attn"] = self.pad_attn_batch(attn_batch)
 
         return output_batch
 
@@ -924,46 +959,48 @@ class Vits(BaseTTS):
         g = speaker_ids if speaker_ids is not None else d_vectors
         return g
 
-    def forward_mas(self, outputs, z_p, m_p, logs_p, x, x_mask, y_mask, g, lang_emb, attn=None):
-        
-        # find the alignment path when it is not given
-        if attn is None:
-            attn_mask = torch.unsqueeze(x_mask, -1) * torch.unsqueeze(y_mask, 2)
-            with torch.no_grad():
-                o_scale = torch.exp(-2 * logs_p)
-                logp1 = torch.sum(-0.5 * math.log(2 * math.pi) - logs_p, [1]).unsqueeze(-1)  # [b, t, 1]
-                logp2 = torch.einsum("klm, kln -> kmn", [o_scale, -0.5 * (z_p**2)])
-                logp3 = torch.einsum("klm, kln -> kmn", [m_p * o_scale, z_p])
-                logp4 = torch.sum(-0.5 * (m_p**2) * o_scale, [1]).unsqueeze(-1)  # [b, t, 1]
-                logp = logp2 + logp3 + logp1 + logp4
-                attn = maximum_path(logp, attn_mask.squeeze(1)).unsqueeze(1).detach()  # [b, 1, t, t']
 
-        #print("loaded attn", attn.size())
-        #print("calculated attn", attn2.size())
+    def get_duration_loss(self, durations, x, x_mask, g, lang_emb):
+
+        if self.args.use_sdp:
+            duration_loss = self.duration_predictor(
+                x.detach() if self.args.detach_dp_input else x,
+                x_mask,
+                durations,
+                g=g.detach() if self.args.detach_dp_input and g is not None else g,
+                lang_emb=lang_emb.detach() if self.args.detach_dp_input and lang_emb is not None else lang_emb,
+            )
+            duration_loss = duration_loss / torch.sum(x_mask)
+        else:
+            log_durations = torch.log(durations + 1e-6) * x_mask
+            log_durations_pred = self.duration_predictor(
+                x.detach() if self.args.detach_dp_input else x,
+                x_mask,
+                g=g.detach() if self.args.detach_dp_input and g is not None else g,
+                lang_emb=lang_emb.detach() if self.args.detach_dp_input and lang_emb is not None else lang_emb,
+            )
+            duration_loss = torch.sum((log_durations_pred - log_durations) ** 2, [1, 2]) / torch.sum(x_mask)
+
+        return duration_loss
+
+
+    def forward_mas(self, outputs, z_p, m_p, logs_p, x, x_mask, y_mask, g, lang_emb):
+        
+        attn_mask = torch.unsqueeze(x_mask, -1) * torch.unsqueeze(y_mask, 2)
+        with torch.no_grad():
+            o_scale = torch.exp(-2 * logs_p)
+            logp1 = torch.sum(-0.5 * math.log(2 * math.pi) - logs_p, [1]).unsqueeze(-1)  # [b, t, 1]
+            logp2 = torch.einsum("klm, kln -> kmn", [o_scale, -0.5 * (z_p**2)])
+            logp3 = torch.einsum("klm, kln -> kmn", [m_p * o_scale, z_p])
+            logp4 = torch.sum(-0.5 * (m_p**2) * o_scale, [1]).unsqueeze(-1)  # [b, t, 1]
+            logp = logp2 + logp3 + logp1 + logp4
+            attn = maximum_path(logp, attn_mask.squeeze(1)).unsqueeze(1).detach()  # [b, 1, t, t']
 
         # duration predictor
         attn_durations = attn.sum(3)
-
-        if self.args.use_sdp:
-            loss_duration = self.duration_predictor(
-                x.detach() if self.args.detach_dp_input else x,
-                x_mask,
-                attn_durations,
-                g=g.detach() if self.args.detach_dp_input and g is not None else g,
-                lang_emb=lang_emb.detach() if self.args.detach_dp_input and lang_emb is not None else lang_emb,
-            )
-            loss_duration = loss_duration / torch.sum(x_mask)
-        else:
-            attn_log_durations = torch.log(attn_durations + 1e-6) * x_mask
-            log_durations = self.duration_predictor(
-                x.detach() if self.args.detach_dp_input else x,
-                x_mask,
-                g=g.detach() if self.args.detach_dp_input and g is not None else g,
-                lang_emb=lang_emb.detach() if self.args.detach_dp_input and lang_emb is not None else lang_emb,
-            )
-            loss_duration = torch.sum((log_durations - attn_log_durations) ** 2, [1, 2]) / torch.sum(x_mask)
-        outputs["loss_duration"] = loss_duration
+        outputs["loss_duration"] = self.get_duration_loss(attn_durations, x, x_mask, g, lang_emb)
         return outputs, attn
+
 
     def upsampling_z(self, z, slice_ids=None, y_lengths=None, y_mask=None):
         spec_segment_size = self.spec_segment_size
@@ -989,7 +1026,7 @@ class Vits(BaseTTS):
         y: torch.tensor,
         y_lengths: torch.tensor,
         waveform: torch.tensor,
-        aux_input={"d_vectors": None, "speaker_ids": None, "language_ids": None, "attn": None},
+        aux_input: Dict = { "d_vectors": None, "speaker_ids": None, "language_ids": None, "attn": None, "duration": None },
     ) -> Dict:
         """Forward pass of the model.
 
@@ -1000,7 +1037,7 @@ class Vits(BaseTTS):
             y_lengths (torch.tensor): Batch of input spectrogram lengths.
             waveform (torch.tensor): Batch of ground truth waveforms per sample.
             aux_input (dict, optional): Auxiliary inputs for multi-speaker and multi-lingual training.
-                Defaults to {"d_vectors": None, "speaker_ids": None, "language_ids": None, "attn": None}.
+                Defaults to { "d_vectors": None, "speaker_ids": None, "language_ids": None, "attn": None, "duration": None }.
 
         Returns:
             Dict: model outputs keyed by the output name.
@@ -1048,15 +1085,19 @@ class Vits(BaseTTS):
         # flow layers
         z_p = self.flow(z, y_mask, g=g)
 
-        if "attn" in aux_input:
-            attn = aux_input["attn"]
-            if attn.ndim == 3:
-                attn = attn.unsqueeze_(1)
-        else:
-            attn = None
+        attn = aux_input.get("attn", None)
+        if (attn is not None) and (attn.ndim == 3):
+            attn = attn.unsqueeze_(1)
+        
+        dur = aux_input.get("duration", None)
+        if (dur is not None) and (dur.ndim == 2):
+            dur = dur.unsqueeze_(1)
 
-        # duration predictor
-        outputs, attn = self.forward_mas(outputs, z_p, m_p, logs_p, x, x_mask, y_mask, g=g, lang_emb=lang_emb, attn=attn)
+        if dur is None or attn is None:
+            # duration predictor
+            outputs, attn = self.forward_mas(outputs, z_p, m_p, logs_p, x, x_mask, y_mask, g=g, lang_emb=lang_emb)
+        else:
+            outputs["loss_duration"] = self.get_duration_loss(dur, x, x_mask, g, lang_emb)
 
         # expand prior
         m_p = torch.einsum("klmn, kjm -> kjn", [attn, m_p])
@@ -1327,9 +1368,13 @@ class Vits(BaseTTS):
             language_ids = batch["language_ids"]
             waveform = batch["waveform"]
 
-            aux_input = {"d_vectors": d_vectors, "speaker_ids": speaker_ids, "language_ids": language_ids}
-            if "attn" in batch:
-                aux_input["attn"] = batch["attn"]
+            aux_input = {
+                "d_vectors": d_vectors,
+                "speaker_ids": speaker_ids,
+                "language_ids": language_ids,
+                "attn": batch.get("attn", None),
+                "duration": batch.get("duration", None)
+            }
 
             # generator pass
             outputs = self.forward(

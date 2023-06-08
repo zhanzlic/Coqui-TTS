@@ -221,6 +221,9 @@ class BaseDatasetConfig(Coqpit):
         meta_file_attn_mask (str):
             Path to the file that lists the attention mask files used with models that require attention masks to
             train the duration predictor.
+
+        meta_file_dur (str):
+            Path to the file that lists the duration of particular input tokens.
     """
 
     formatter: str = ""
@@ -232,6 +235,7 @@ class BaseDatasetConfig(Coqpit):
     phonemizer: str = ""
     meta_file_val: str = ""
     meta_file_attn_mask: str = ""
+    meta_file_dur: str = ""
 
     def check_values(
         self,
