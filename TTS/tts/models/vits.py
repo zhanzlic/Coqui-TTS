@@ -982,7 +982,7 @@ class Vits(BaseTTS):
         return duration_loss
 
 
-    def forward_mas(self, outputs, z_p, m_p, logs_p, x, x_mask, y_mask, g, lang_emb):
+    def forward_mas(self, z_p, m_p, logs_p, x_mask, y_mask):
         
         attn_mask = torch.unsqueeze(x_mask, -1) * torch.unsqueeze(y_mask, 2)
         with torch.no_grad():
@@ -994,10 +994,7 @@ class Vits(BaseTTS):
             logp = logp2 + logp3 + logp1 + logp4
             attn = maximum_path(logp, attn_mask.squeeze(1)).unsqueeze(1).detach()  # [b, 1, t, t']
 
-        # duration predictor
-        attn_durations = attn.sum(3)
-        outputs["loss_duration"] = self.get_duration_loss(attn_durations, x, x_mask, g, lang_emb)
-        return outputs, attn
+        return attn
 
 
     def upsampling_z(self, z, slice_ids=None, y_lengths=None, y_mask=None):
@@ -1063,7 +1060,6 @@ class Vits(BaseTTS):
             - gt_spk_emb: :math:`[B, 1, speaker_encoder.proj_dim]`
             - syn_spk_emb: :math:`[B, 1, speaker_encoder.proj_dim]`
         """
-        outputs = {}
         sid, g, lid, dur = self._set_cond_input(aux_input)
 
         # speaker embedding
@@ -1084,13 +1080,14 @@ class Vits(BaseTTS):
         z_p = self.flow(z, y_mask, g=g)
 
         attn = aux_input.get("attn", None)
-        if (attn is not None) and (attn.ndim == 3):
+        if attn is None:
+            attn = self.forward_mas(z_p, m_p, logs_p, x_mask, y_mask)
+        if attn.ndim == 3:
             attn = attn.unsqueeze_(1)
+        if dur is None:
+            dur = attn.sum(3)
 
-        if dur is None or attn is None:  # duration predictor
-            outputs, attn = self.forward_mas(outputs, z_p, m_p, logs_p, x, x_mask, y_mask, g=g, lang_emb=lang_emb)
-        else:
-            outputs["loss_duration"] = self.get_duration_loss(dur, x, x_mask, g, lang_emb)
+        loss_duration = self.get_duration_loss(dur, x, x_mask, g, lang_emb)
 
         # expand prior
         m_p = torch.einsum("klmn, kjm -> kjn", [attn, m_p])
@@ -1127,22 +1124,22 @@ class Vits(BaseTTS):
         else:
             gt_spk_emb, syn_spk_emb = None, None
 
-        outputs.update(
-            {
-                "model_outputs": o,
-                "alignments": attn.squeeze(1),
-                "m_p": m_p,
-                "logs_p": logs_p,
-                "z": z,
-                "z_p": z_p,
-                "m_q": m_q,
-                "logs_q": logs_q,
-                "waveform_seg": wav_seg,
-                "gt_spk_emb": gt_spk_emb,
-                "syn_spk_emb": syn_spk_emb,
-                "slice_ids": slice_ids,
-            }
-        )
+        outputs = {
+            "model_outputs": o,
+            "alignments": attn.squeeze(1),
+            "loss_duration": loss_duration,
+            "m_p": m_p,
+            "logs_p": logs_p,
+            "z": z,
+            "z_p": z_p,
+            "m_q": m_q,
+            "logs_q": logs_q,
+            "waveform_seg": wav_seg,
+            "gt_spk_emb": gt_spk_emb,
+            "syn_spk_emb": syn_spk_emb,
+            "slice_ids": slice_ids,
+        }
+        
         return outputs
 
     @staticmethod
