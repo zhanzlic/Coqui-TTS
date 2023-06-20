@@ -350,25 +350,21 @@ class VitsDataset(TTSDataset):
         B = len(batch)
         batch = {k: [dic[k] for dic in batch] for k in batch[0]}
 
-        _, ids_sorted_decreasing = torch.sort(
-            torch.LongTensor([x.size(1) for x in batch["wav"]]), dim=0, descending=True
-        )
-
-        max_text_len = max([len(x) for x in batch["token_ids"]])
         token_lens = torch.LongTensor(batch["token_len"])
-        token_rel_lens = token_lens / token_lens.max()
+        token_lens_max = torch.max(token_lens)
+        token_rel_lens = token_lens / token_lens_max
 
         wav_lens = [w.shape[1] for w in batch["wav"]]
         wav_lens = torch.LongTensor(wav_lens)
         wav_lens_max = torch.max(wav_lens)
         wav_rel_lens = wav_lens / wav_lens_max
 
-        token_padded = torch.LongTensor(B, max_text_len)
+        token_padded = torch.LongTensor(B, token_lens_max)
         wav_padded = torch.FloatTensor(B, 1, wav_lens_max)
         token_padded = token_padded.zero_() + self.pad_id
         wav_padded = wav_padded.zero_() + self.pad_id
 
-        for i in range(len(ids_sorted_decreasing)):
+        for i in range(B):
             token_ids = batch["token_ids"][i]
             token_padded[i, : batch["token_len"][i]] = torch.LongTensor(token_ids)
 
@@ -395,9 +391,9 @@ class VitsDataset(TTSDataset):
 
         # ZHa: pad duration vectors
         if "duration" in batch:
-            duration_padded = torch.FloatTensor(B, max_text_len)
+            duration_padded = torch.FloatTensor(B, token_lens_max)
             duration_padded = duration_padded.zero_()
-            for i in range(len(ids_sorted_decreasing)):
+            for i in range(B):
                 duration_padded[i, : batch["token_len"][i]] = torch.FloatTensor(batch["duration"][i])
 
             output_batch["duration"] = duration_padded
@@ -943,6 +939,8 @@ class Vits(BaseTTS):
 
         if "durations" in aux_input and aux_input["durations"] is not None:
             durations = aux_input["durations"]
+            if durations.ndim == 2:
+                durations = durations.unsqueeze_(1)
 
         return sid, g, lid, durations
 
@@ -1026,7 +1024,7 @@ class Vits(BaseTTS):
         y: torch.tensor,
         y_lengths: torch.tensor,
         waveform: torch.tensor,
-        aux_input: Dict = { "d_vectors": None, "speaker_ids": None, "language_ids": None, "attn": None, "duration": None },
+        aux_input: Dict = { "d_vectors": None, "speaker_ids": None, "language_ids": None, "attn": None, "durations": None },
     ) -> Dict:
         """Forward pass of the model.
 
@@ -1037,7 +1035,7 @@ class Vits(BaseTTS):
             y_lengths (torch.tensor): Batch of input spectrogram lengths.
             waveform (torch.tensor): Batch of ground truth waveforms per sample.
             aux_input (dict, optional): Auxiliary inputs for multi-speaker and multi-lingual training.
-                Defaults to { "d_vectors": None, "speaker_ids": None, "language_ids": None, "attn": None, "duration": None }.
+                Defaults to { "d_vectors": None, "speaker_ids": None, "language_ids": None, "attn": None, "durations": None }.
 
         Returns:
             Dict: model outputs keyed by the output name.
@@ -1066,7 +1064,7 @@ class Vits(BaseTTS):
             - syn_spk_emb: :math:`[B, 1, speaker_encoder.proj_dim]`
         """
         outputs = {}
-        sid, g, lid, _ = self._set_cond_input(aux_input)
+        sid, g, lid, dur = self._set_cond_input(aux_input)
 
         # speaker embedding
         if self.args.use_speaker_embedding and sid is not None:
@@ -1088,13 +1086,8 @@ class Vits(BaseTTS):
         attn = aux_input.get("attn", None)
         if (attn is not None) and (attn.ndim == 3):
             attn = attn.unsqueeze_(1)
-        
-        dur = aux_input.get("duration", None)
-        if (dur is not None) and (dur.ndim == 2):
-            dur = dur.unsqueeze_(1)
 
-        if dur is None or attn is None:
-            # duration predictor
+        if dur is None or attn is None:  # duration predictor
             outputs, attn = self.forward_mas(outputs, z_p, m_p, logs_p, x, x_mask, y_mask, g=g, lang_emb=lang_emb)
         else:
             outputs["loss_duration"] = self.get_duration_loss(dur, x, x_mask, g, lang_emb)
@@ -1373,7 +1366,7 @@ class Vits(BaseTTS):
                 "speaker_ids": speaker_ids,
                 "language_ids": language_ids,
                 "attn": batch.get("attn", None),
-                "duration": batch.get("duration", None)
+                "durations": batch.get("duration", None)
             }
 
             # generator pass
