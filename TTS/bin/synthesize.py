@@ -356,7 +356,7 @@ If you don't specify any models, then it uses LJSpeech based English model.
             vc_config_path = config_path
 
         # tts model with multiple files to be loaded from the directory path
-        if model_item.get("author", None) == "fairseq" or isinstance(model_item["github_rls_url"], list):
+        if model_item.get("author", None) == "fairseq" or isinstance(model_item["model_url"], list):
             model_dir = model_path
             tts_path = None
             tts_config_path = None
@@ -430,9 +430,9 @@ If you don't specify any models, then it uses LJSpeech based English model.
     if tts_path is not None:
         wav = synthesizer.tts(
             args.text,
-            args.speaker_idx,
-            args.language_idx,
-            args.speaker_wav,
+            speaker_name=args.speaker_idx,
+            language_name=args.language_idx,
+            speaker_wav=args.speaker_wav,
             reference_wav=args.reference_wav,
             style_wav=args.capacitron_style_wav,
             style_text=args.capacitron_style_text,
