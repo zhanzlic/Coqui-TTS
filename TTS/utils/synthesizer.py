@@ -231,7 +231,21 @@ class Synthesizer(object):
         Returns:
             List[str]: list of sentences.
         """
-        return self.seg.segment(text)
+        # JMa
+        if "!" in self.tts_config.characters.characters:
+            # Our proprietary phonetic mode enabled: the input text is assumed
+            # to be a sequence of phones plus punctuations (without "!") and pauses (#, $).
+            # (!) is a regular character, not a punctuation
+            # WA: Glottal stop [!] is temporarily replaced with [*] to prevent
+            # boundary detection.
+            #
+            # Example: "!ahoj, !adame." -> ["!ahoj, !", "adame."]
+            # Fix:     "!ahoj, !adame." -> ["!ahoj, !adame."]
+            text = text.replace("!", "*")
+            sents = self.seg.segment(text)
+            return [s.replace("*", "!") for s in sents]
+        else: # Original code
+            return self.seg.segment(text)
 
     def save_wav(self, wav: List[int], path: str) -> None:
         """Save the waveform as a file.
@@ -358,7 +372,7 @@ class Synthesizer(object):
 
         use_gl = self.vocoder_model is None
 
-        if not reference_wav:
+        if not reference_wav:  # not voice conversion
             for sen in sens:
                 if hasattr(self.tts_model, "synthesize"):
                     sp_name = "random" if speaker_name is None else speaker_name
@@ -366,7 +380,7 @@ class Synthesizer(object):
                         text=sen,
                         config=self.tts_config,
                         speaker_id=sp_name,
-                        extra_voice_dirs=self.voice_dir,
+                        voice_dirs=self.voice_dir,
                         **kwargs,
                     )
                 else:
