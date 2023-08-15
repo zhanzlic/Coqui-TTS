@@ -2009,7 +2009,11 @@ class Vits(BaseTTS):
     def load_onnx(self, model_path: str, cuda=False):
         import onnxruntime as ort
 
-        providers = ["CPUExecutionProvider" if cuda is False else "CUDAExecutionProvider"]
+        providers = [
+            "CPUExecutionProvider"
+            if cuda is False
+            else ("CUDAExecutionProvider", {"cudnn_conv_algo_search": "DEFAULT"})
+        ]
         sess_options = ort.SessionOptions()
         self.onnx_sess = ort.InferenceSession(
             model_path,
@@ -2017,11 +2021,8 @@ class Vits(BaseTTS):
             providers=providers,
         )
 
-    def inference_onnx(self, x, x_lengths=None):
-        """ONNX inference (only single speaker models are supported)
-
-        TODO: implement multi speaker support.
-        """
+    def inference_onnx(self, x, x_lengths=None, speaker_id=None):
+        """ONNX inference"""
 
         if isinstance(x, torch.Tensor):
             x = x.cpu().numpy()
@@ -2041,7 +2042,7 @@ class Vits(BaseTTS):
                 "input": x,
                 "input_lengths": x_lengths,
                 "scales": scales,
-                "sid": None,
+                "sid": torch.tensor([speaker_id]).cpu().numpy(),
             },
         )
         return audio[0][0]
@@ -2115,7 +2116,6 @@ class FairseqVocab(BaseVocabulary):
         with open(vocab_file, encoding="utf-8") as f:
             self._vocab = [x.replace("\n", "") for x in f.readlines()]
         self.blank = self._vocab[0]
-        print(self._vocab)
         self.pad = " "
         self._char_to_id = {s: i for i, s in enumerate(self._vocab)}  # pylint: disable=unnecessary-comprehension
         self._id_to_char = {i: s for i, s in enumerate(self._vocab)}  # pylint: disable=unnecessary-comprehension

@@ -1,4 +1,4 @@
-name: inference_tests
+name: tts-tests2
 
 on:
   push:
@@ -32,12 +32,12 @@ jobs:
       - name: check OS
         run: cat /etc/os-release
       - name: set ENV
-        run: |
-          export TRAINER_TELEMETRY=0
+        run: export TRAINER_TELEMETRY=0
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends git make gcc
+          sudo apt-get install espeak
           sudo apt-get install espeak-ng
           make system-deps
       - name: Install/upgrade Python setup deps
@@ -50,4 +50,4 @@ jobs:
           python3 -m pip install .[all]
           python3 setup.py egg_info
       - name: Unit tests
-        run: make inference_tests
+        run: make test_tts2
