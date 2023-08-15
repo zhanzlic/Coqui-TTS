@@ -1859,7 +1859,7 @@ class Vits(BaseTTS):
             assert not self.training
 
     def load_fairseq_checkpoint(
-        self, config, checkpoint_dir, eval=False
+        self, config, checkpoint_dir, eval=False, strict=True
     ):  # pylint: disable=unused-argument, redefined-builtin
         """Load VITS checkpoints released by fairseq here: https://github.com/facebookresearch/fairseq/tree/main/examples/mms
         Performs some changes for compatibility.
@@ -1897,7 +1897,7 @@ class Vits(BaseTTS):
         )
         # load fairseq checkpoint
         new_chk = rehash_fairseq_vits_checkpoint(checkpoint_file)
-        self.load_state_dict(new_chk)
+        self.load_state_dict(new_chk, strict=strict)
         if eval:
             self.eval()
             assert not self.training
@@ -1947,14 +1947,16 @@ class Vits(BaseTTS):
 
         # rollback values
         _forward = self.forward
-        disc = self.disc
+        disc = None
+        if hasattr(self, "disc"):
+            disc = self.disc
         training = self.training
 
         # set export mode
         self.disc = None
         self.eval()
 
-        def onnx_inference(text, text_lengths, scales, sid=None):
+        def onnx_inference(text, text_lengths, scales, sid=None, langid=None):
             noise_scale = scales[0]
             length_scale = scales[1]
             noise_scale_dp = scales[2]
@@ -1967,7 +1969,7 @@ class Vits(BaseTTS):
                     "x_lengths": text_lengths,
                     "d_vectors": None,
                     "speaker_ids": sid,
-                    "language_ids": None,
+                    "language_ids": langid,
                     "durations": None,
                 },
             )["model_outputs"]
@@ -1976,13 +1978,21 @@ class Vits(BaseTTS):
 
         # set dummy inputs
         dummy_input_length = 100
-        sequences = torch.randint(low=0, high=self.args.num_chars, size=(1, dummy_input_length), dtype=torch.long)
+        sequences = torch.randint(low=0, high=2, size=(1, dummy_input_length), dtype=torch.long)
         sequence_lengths = torch.LongTensor([sequences.size(1)])
-        sepaker_id = None
-        if self.num_speakers > 1:
-            sepaker_id = torch.LongTensor([0])
         scales = torch.FloatTensor([self.inference_noise_scale, self.length_scale, self.inference_noise_scale_dp])
-        dummy_input = (sequences, sequence_lengths, scales, sepaker_id)
+        dummy_input = (sequences, sequence_lengths, scales)
+        input_names = ["input", "input_lengths", "scales"]
+
+        if self.num_speakers > 0:
+            speaker_id = torch.LongTensor([0])
+            dummy_input += (speaker_id,)
+            input_names.append("sid")
+
+        if hasattr(self, "num_languages") and self.num_languages > 0 and self.embedded_language_dim > 0:
+            language_id = torch.LongTensor([0])
+            dummy_input += (language_id,)
+            input_names.append("langid")
 
         # export to ONNX
         torch.onnx.export(
@@ -1991,7 +2001,7 @@ class Vits(BaseTTS):
             opset_version=15,
             f=output_path,
             verbose=verbose,
-            input_names=["input", "input_lengths", "scales", "sid"],
+            input_names=input_names,
             output_names=["output"],
             dynamic_axes={
                 "input": {0: "batch_size", 1: "phonemes"},
@@ -2004,7 +2014,8 @@ class Vits(BaseTTS):
         self.forward = _forward
         if training:
             self.train()
-        self.disc = disc
+        if not disc is None:
+            self.disc = disc
 
     def load_onnx(self, model_path: str, cuda=False):
         import onnxruntime as ort
@@ -2021,7 +2032,7 @@ class Vits(BaseTTS):
             providers=providers,
         )
 
-    def inference_onnx(self, x, x_lengths=None, speaker_id=None):
+    def inference_onnx(self, x, x_lengths=None, speaker_id=None, language_id=None):
         """ONNX inference"""
 
         if isinstance(x, torch.Tensor):
@@ -2036,14 +2047,15 @@ class Vits(BaseTTS):
             [self.inference_noise_scale, self.length_scale, self.inference_noise_scale_dp],
             dtype=np.float32,
         )
+        input_params = {"input": x, "input_lengths": x_lengths, "scales": scales}
+        if not speaker_id is None:
+            input_params["sid"] = torch.tensor([speaker_id]).cpu().numpy()
+        if not language_id is None:
+            input_params["langid"] = torch.tensor([language_id]).cpu().numpy()
+
         audio = self.onnx_sess.run(
             ["output"],
-            {
-                "input": x,
-                "input_lengths": x_lengths,
-                "scales": scales,
-                "sid": torch.tensor([speaker_id]).cpu().numpy(),
-            },
+            input_params,
         )
         return audio[0][0]
 
