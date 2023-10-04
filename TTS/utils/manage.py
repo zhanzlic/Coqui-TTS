@@ -21,6 +21,7 @@ LICENSE_URLS = {
     "apache 2.0": "https://choosealicense.com/licenses/apache-2.0/",
     "apache2": "https://choosealicense.com/licenses/apache-2.0/",
     "cc-by-sa 4.0": "https://creativecommons.org/licenses/by-sa/4.0/",
+    "cpml": "https://coqui.ai/cpml.txt",
 }
 
 
@@ -295,6 +296,30 @@ class ModelManager(object):
         model_item = self.set_model_url(model_item)
         return model_item, model_full_name, model
 
+    def ask_tos(self, model_full_path):
+        """Ask the user to agree to the terms of service"""
+        tos_path = os.path.join(model_full_path, "tos_agreed.txt")
+        if not os.path.exists(tos_path):
+            print(" > You must agree to the terms of service to use this model.")
+            print(" | > Please see the terms of service at https://coqui.ai/cpml.txt")
+            print(' | > "I have read, understood and agreed the Terms and Conditions." - [y/n]')
+            answer = input(" | | > ")
+            if answer.lower() == "y":
+                with open(tos_path, "w") as f:
+                    f.write("I have read, understood ad agree the Terms and Conditions.")
+                return True
+            else:
+                return False
+
+    def tos_agreed(self, model_item, model_full_path):
+        """Check if the user has agreed to the terms of service"""
+        if "tos_required" in model_item and model_item["tos_required"]:
+            tos_path = os.path.join(model_full_path, "tos_agreed.txt")
+            if os.path.exists(tos_path) or os.environ.get("COQUI_TOS_AGREED") == "1":
+                return True
+            return False
+        return True
+
     def download_model(self, model_name):
         """Download model files given the full model name.
         Model name is in the format
@@ -316,6 +341,11 @@ class ModelManager(object):
             print(f" > {model_name} is already downloaded.")
         else:
             os.makedirs(output_path, exist_ok=True)
+            # handle TOS
+            if not self.tos_agreed(model_item, output_path):
+                if not self.ask_tos(output_path):
+                    os.rmdir(output_path)
+                    raise Exception(" [!] You must agree to the terms of service to use this model.")
             print(f" > Downloading model to {output_path}")
             try:
                 if "fairseq" in model_name:
@@ -325,7 +355,7 @@ class ModelManager(object):
                 elif "hf_url" in model_item:
                     self._download_hf_model(model_item, output_path)
 
-            except requests.Exception.RequestException as e:
+            except requests.RequestException as e:
                 print(f" > Failed to download the model file to {output_path}")
                 rmtree(output_path)
                 raise e
@@ -334,7 +364,7 @@ class ModelManager(object):
         output_model_path = output_path
         output_config_path = None
         if (
-            model not in ["tortoise-v2", "bark"] and "fairseq" not in model_name
+            model not in ["tortoise-v2", "bark", "xtts_v1"] and "fairseq" not in model_name
         ):  # TODO:This is stupid but don't care for now.
             output_model_path, output_config_path = self._find_files(output_path)
         # update paths in the config.json
@@ -468,13 +498,16 @@ class ModelManager(object):
             print(f" > Error: Bad zip file - {file_url}")
             raise zipfile.BadZipFile  # pylint: disable=raise-missing-from
         # move the files to the outer path
-        for file_path in z.namelist()[1:]:
+        for file_path in z.namelist():
             src_path = os.path.join(output_folder, file_path)
-            dst_path = os.path.join(output_folder, os.path.basename(file_path))
-            if src_path != dst_path:
-                copyfile(src_path, dst_path)
-        # remove the extracted folder
-        rmtree(os.path.join(output_folder, z.namelist()[0]))
+            if os.path.isfile(src_path):
+                dst_path = os.path.join(output_folder, os.path.basename(file_path))
+                if src_path != dst_path:
+                    copyfile(src_path, dst_path)
+        # remove redundant (hidden or not) folders
+        for file_path in z.namelist():
+            if os.path.isdir(os.path.join(output_folder, file_path)):
+                rmtree(os.path.join(output_folder, file_path))
 
     @staticmethod
     def _download_tar_file(file_url, output_folder, progress_bar):

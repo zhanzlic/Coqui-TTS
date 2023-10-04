@@ -1,12 +1,3 @@
-"""
-This is an almost carbon copy of gaussian_diffusion.py from OpenAI's ImprovedDiffusion repo, which itself:
-
-This code started out as a PyTorch port of Ho et al's diffusion models:
-https://github.com/hojonathanho/diffusion/blob/1e0dceb3b3495bbe19116a5e1b3596cd0706c543/diffusion_tf/diffusion_utils_2.py
-
-Docstrings have been added, as well as DDIM sampling and a new collection of beta schedules.
-"""
-
 import enum
 import math
 
@@ -191,11 +182,11 @@ class GaussianDiffusion:
         model_mean_type,
         model_var_type,
         loss_type,
-        rescale_timesteps=False,
+        rescale_timesteps=False,  # this is generally False
         conditioning_free=False,
         conditioning_free_k=1,
         ramp_conditioning_free=True,
-        sampler="p",
+        sampler="ddim",
     ):
         self.sampler = sampler
         self.model_mean_type = ModelMeanType(model_mean_type)
@@ -313,6 +304,10 @@ class GaussianDiffusion:
         if model_kwargs is None:
             model_kwargs = {}
 
+        assert self.model_var_type == ModelVarType.LEARNED_RANGE
+        assert self.model_mean_type == ModelMeanType.EPSILON
+        assert denoised_fn is None
+        assert clip_denoised is True
         B, C = x.shape[:2]
         assert t.shape == (B,)
         model_output = model(x, self._scale_timesteps(t), **model_kwargs)
@@ -325,6 +320,7 @@ class GaussianDiffusion:
             if self.conditioning_free:
                 model_output_no_conditioning, _ = th.split(model_output_no_conditioning, C, dim=1)
             if self.model_var_type == ModelVarType.LEARNED:
+                assert False
                 model_log_variance = model_var_values
                 model_variance = th.exp(model_log_variance)
             else:
@@ -335,6 +331,7 @@ class GaussianDiffusion:
                 model_log_variance = frac * max_log + (1 - frac) * min_log
                 model_variance = th.exp(model_log_variance)
         else:
+            assert False
             model_variance, model_log_variance = {
                 # for fixedlarge, we set the initial (log-)variance like so
                 # to get a better decoder log likelihood.
@@ -360,16 +357,20 @@ class GaussianDiffusion:
 
         def process_xstart(x):
             if denoised_fn is not None:
+                assert False
                 x = denoised_fn(x)
             if clip_denoised:
                 return x.clamp(-1, 1)
+            assert False
             return x
 
         if self.model_mean_type == ModelMeanType.PREVIOUS_X:
+            assert False
             pred_xstart = process_xstart(self._predict_xstart_from_xprev(x_t=x, t=t, xprev=model_output))
             model_mean = model_output
         elif self.model_mean_type in [ModelMeanType.START_X, ModelMeanType.EPSILON]:
             if self.model_mean_type == ModelMeanType.START_X:
+                assert False
                 pred_xstart = process_xstart(model_output)
             else:
                 pred_xstart = process_xstart(self._predict_xstart_from_eps(x_t=x, t=t, eps=model_output))
@@ -442,6 +443,48 @@ class GaussianDiffusion:
         out["mean"], _, _ = self.q_posterior_mean_variance(x_start=out["pred_xstart"], x_t=x, t=t)
         return out
 
+    def p_sample(
+        self,
+        model,
+        x,
+        t,
+        clip_denoised=True,
+        denoised_fn=None,
+        cond_fn=None,
+        model_kwargs=None,
+    ):
+        """
+        Sample x_{t-1} from the model at the given timestep.
+
+        :param model: the model to sample from.
+        :param x: the current tensor at x_{t-1}.
+        :param t: the value of t, starting at 0 for the first diffusion step.
+        :param clip_denoised: if True, clip the x_start prediction to [-1, 1].
+        :param denoised_fn: if not None, a function which applies to the
+            x_start prediction before it is used to sample.
+        :param cond_fn: if not None, this is a gradient function that acts
+                        similarly to the model.
+        :param model_kwargs: if not None, a dict of extra keyword arguments to
+            pass to the model. This can be used for conditioning.
+        :return: a dict containing the following keys:
+                 - 'sample': a random sample from the model.
+                 - 'pred_xstart': a prediction of x_0.
+        """
+        out = self.p_mean_variance(
+            model,
+            x,
+            t,
+            clip_denoised=clip_denoised,
+            denoised_fn=denoised_fn,
+            model_kwargs=model_kwargs,
+        )
+        noise = th.randn_like(x)
+        nonzero_mask = (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))  # no noise when t == 0
+        if cond_fn is not None:
+            out["mean"] = self.condition_mean(cond_fn, out, x, t, model_kwargs=model_kwargs)
+        sample = out["mean"] + nonzero_mask * th.exp(0.5 * out["log_variance"]) * noise
+        return {"sample": sample, "pred_xstart": out["pred_xstart"]}
+
     def k_diffusion_sample_loop(
         self,
         k_sampler,
@@ -510,6 +553,23 @@ class GaussianDiffusion:
             unconditional_condition=th.Tensor(1),
             guidance_scale=self.conditioning_free_k,
         )
+        """
+        model_fn = model_wrapper(
+            model_fn_prewrap,
+            noise_schedule,
+            model_type='x_start',
+            model_kwargs={}
+        )
+        #
+        dpm_solver = DPM_Solver(model_fn, noise_schedule, algorithm_type="dpmsolver")
+        x_sample = dpm_solver.sample(
+            noise,
+            steps=20,
+            order=3,
+            skip_type="time_uniform",
+            method="singlestep",
+        )
+        """
         dpm_solver = DPM_Solver(model_fn, noise_schedule, algorithm_type="dpmsolver++")
         x_sample = dpm_solver.sample(
             noise,
@@ -520,6 +580,63 @@ class GaussianDiffusion:
         )
         #'''
         return x_sample
+
+        # HF DIFFUSION ATTEMPT
+        """
+        from .hf_diffusion import EulerAncestralDiscreteScheduler
+        Scheduler = EulerAncestralDiscreteScheduler()
+        Scheduler.set_timesteps(100)
+        for timestep in Scheduler.timesteps:
+            noise_input = Scheduler.scale_model_input(noise, timestep)
+            ts = s_in * timestep
+            model_output = model(noise_input, ts, **model_kwargs)
+            model_epsilon, _model_var = th.split(model_output, model_output.shape[1]//2, dim=1)
+            noise, _x0 = Scheduler.step(model_epsilon, timestep, noise)
+        return noise
+        """
+
+        # KARRAS DIFFUSION ATTEMPT
+        """
+        TRAINED_DIFFUSION_STEPS = 4000 # HARDCODED
+        ratio = TRAINED_DIFFUSION_STEPS/14.5
+        def call_model(*args, **kwargs):
+            model_output = model(*args, **kwargs)
+            model_output, model_var_values = th.split(model_output, model_output.shape[1]//2, dim=1)
+            return model_output
+        print(get_sigmas_karras(self.num_timesteps, sigma_min=0.0, sigma_max=4000, device=device))
+        exit()
+        sigmas = get_sigmas_karras(self.num_timesteps, sigma_min=0.03, sigma_max=14.5, device=device)
+        return k_sampler(call_model, noise, sigmas, extra_args=model_kwargs, disable=not progress)
+        '''
+        sigmas = get_sigmas_karras(self.num_timesteps, sigma_min=0.03, sigma_max=14.5, device=device)
+        step = 0 # LMAO
+        global_sigmas = None
+        #
+        def fakemodel(x, t, **model_kwargs):
+            print(t,global_sigmas*ratio)
+            return model(x, t, **model_kwargs)
+        def denoised(x, sigmas, **extra_args):
+            t = th.tensor([self.num_timesteps-step-1] * shape[0], device=device)
+            nonlocal global_sigmas
+            global_sigmas = sigmas
+            with th.no_grad():
+                out = self.p_sample(
+                    fakemodel,
+                    x,
+                    t,
+                    clip_denoised=clip_denoised,
+                    denoised_fn=denoised_fn,
+                    cond_fn=cond_fn,
+                    model_kwargs=model_kwargs,
+                )
+                return out["sample"]
+        def callback(d):
+            nonlocal step
+            step += 1
+
+        return k_sampler(denoised, noise, sigmas, extra_args=model_kwargs, callback=callback, disable=not progress)
+        '''
+        """
 
     def sample_loop(self, *args, **kwargs):
         s = self.sampler
@@ -534,48 +651,6 @@ class GaussianDiffusion:
                 return self.k_diffusion_sample_loop(K_DIFFUSION_SAMPLERS[s], pbar, *args, **kwargs)
         else:
             raise RuntimeError("sampler not impl")
-
-    def p_sample(
-        self,
-        model,
-        x,
-        t,
-        clip_denoised=True,
-        denoised_fn=None,
-        cond_fn=None,
-        model_kwargs=None,
-    ):
-        """
-        Sample x_{t-1} from the model at the given timestep.
-
-        :param model: the model to sample from.
-        :param x: the current tensor at x_{t-1}.
-        :param t: the value of t, starting at 0 for the first diffusion step.
-        :param clip_denoised: if True, clip the x_start prediction to [-1, 1].
-        :param denoised_fn: if not None, a function which applies to the
-            x_start prediction before it is used to sample.
-        :param cond_fn: if not None, this is a gradient function that acts
-                        similarly to the model.
-        :param model_kwargs: if not None, a dict of extra keyword arguments to
-            pass to the model. This can be used for conditioning.
-        :return: a dict containing the following keys:
-                 - 'sample': a random sample from the model.
-                 - 'pred_xstart': a prediction of x_0.
-        """
-        out = self.p_mean_variance(
-            model,
-            x,
-            t,
-            clip_denoised=clip_denoised,
-            denoised_fn=denoised_fn,
-            model_kwargs=model_kwargs,
-        )
-        noise = th.randn_like(x)
-        nonzero_mask = (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))  # no noise when t == 0
-        if cond_fn is not None:
-            out["mean"] = self.condition_mean(cond_fn, out, x, t, model_kwargs=model_kwargs)
-        sample = out["mean"] + nonzero_mask * th.exp(0.5 * out["log_variance"]) * noise
-        return {"sample": sample, "pred_xstart": out["pred_xstart"]}
 
     def p_sample_loop(
         self,
@@ -940,7 +1015,14 @@ class GaussianDiffusion:
         return terms
 
     def autoregressive_training_losses(
-        self, model, x_start, t, model_output_keys, gd_out_key, model_kwargs=None, noise=None
+        self,
+        model,
+        x_start,
+        t,
+        model_output_keys,
+        gd_out_key,
+        model_kwargs=None,
+        noise=None,
     ):
         """
         Compute training losses for a single timestep.
@@ -972,7 +1054,10 @@ class GaussianDiffusion:
             ]:
                 B, C = x_t.shape[:2]
                 assert model_output.shape == (B, C, 2, *x_t.shape[2:])
-                model_output, model_var_values = model_output[:, :, 0], model_output[:, :, 1]
+                model_output, model_var_values = (
+                    model_output[:, :, 0],
+                    model_output[:, :, 1],
+                )
                 # Learn the variance using the variational bound, but don't let
                 # it affect our mean prediction.
                 frozen_out = th.cat([model_output.detach(), model_var_values], dim=1)
@@ -1098,6 +1183,7 @@ class SpacedDiffusion(GaussianDiffusion):
         self.use_timesteps = set(use_timesteps)
         self.timestep_map = []
         self.original_num_steps = len(kwargs["betas"])
+
         base_diffusion = GaussianDiffusion(**kwargs)  # pylint: disable=missing-kwoa
         last_alpha_cumprod = 1.0
         new_betas = []
@@ -1199,8 +1285,7 @@ class _WrappedModel:
         new_ts = map_tensor[ts]
         if self.rescale_timesteps:
             new_ts = new_ts.float() * (1000.0 / self.original_num_steps)
-        model_output = self.model(x, new_ts, **kwargs)
-        return model_output
+        return self.model(x, new_ts, **kwargs)
 
 
 class _WrappedAutoregressiveModel:
