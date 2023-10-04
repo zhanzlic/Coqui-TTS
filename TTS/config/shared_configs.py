@@ -224,6 +224,9 @@ class BaseDatasetConfig(Coqpit):
 
         meta_file_dur (str):
             Path to the file that lists the duration of particular input tokens.
+
+        meta_file_pitch (str):
+            Path to the file that lists the average pitch of particular input tokens.
     """
 
     formatter: str = ""
@@ -236,6 +239,7 @@ class BaseDatasetConfig(Coqpit):
     meta_file_val: str = ""
     meta_file_attn_mask: str = ""
     meta_file_dur: str = ""
+    meta_file_pitch: str = ""
 
     def check_values(
         self,
@@ -247,6 +251,8 @@ class BaseDatasetConfig(Coqpit):
         check_argument("meta_file_train", c, restricted=True)
         check_argument("meta_file_val", c, restricted=False)
         check_argument("meta_file_attn_mask", c, restricted=False)
+        check_argument("meta_file_dur", c, restricted=False)
+        check_argument("meta_file_pitch", c, restricted=False)
 
 
 @dataclass

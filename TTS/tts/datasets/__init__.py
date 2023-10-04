@@ -139,7 +139,9 @@ def load_tts_samples(
             if not fn.exists():
                 fn = Path(root_path) / fn
 
-            assert fn.exists(), f" [!] Cannot find/open attention metafile \"{dataset['meta_file_dur']}\""
+            assert fn.exists(), f" [!] Cannot find/open duration metafile \"{dataset['meta_file_dur']}\""
+            
+            print(" > Loading duration metafile", fn)
             meta_data = dict(load_duration_meta_data(fn))
 
             for idx, ins in enumerate(meta_data_train_all):
@@ -151,6 +153,25 @@ def load_tts_samples(
                     if ins["utt_name"] in meta_data:
                         meta_data_eval_all[idx].update({"duration": meta_data[ins["utt_name"]]})
 
+        if dataset.meta_file_pitch:
+            fn = Path(dataset["meta_file_pitch"])
+            if not fn.exists():
+                fn = Path(root_path) / fn
+
+            assert fn.exists(), f" [!] Cannot find/open pitch metafile \"{dataset['meta_file_pitch']}\""
+
+            print(" > Loading pitch metafile", fn)
+            meta_data = dict(load_pitch_meta_data(fn))
+
+            for idx, ins in enumerate(meta_data_train_all):
+                if ins["utt_name"] in meta_data:
+                    meta_data_train_all[idx].update({"pitch": meta_data[ins["utt_name"]]})
+
+            if meta_data_eval_all:
+                for idx, ins in enumerate(meta_data_eval_all):
+                    if ins["utt_name"] in meta_data:
+                        meta_data_eval_all[idx].update({"pitch": meta_data[ins["utt_name"]]})
+
         # load attention masks for the duration predictor training
         if dataset.meta_file_attn_mask:
             
@@ -159,6 +180,8 @@ def load_tts_samples(
                 fn = Path(root_path) / fn
 
             assert fn.exists(), f" [!] Cannot find/open attention metafile \"{dataset['meta_file_attn_mask']}\""
+
+            print(" > Loading attention-mask metafile", fn)
             meta_data = dict(load_attention_mask_meta_data(fn))
             
             for idx, ins in enumerate(meta_data_train_all):
@@ -217,6 +240,19 @@ def load_duration_meta_data(metafile_path) -> Dict:
         utt_name, dur_str = line.split("|")
         durations = [ int(D.strip()) for D in dur_str.split(",") ]
         meta_data[utt_name] = np.array(durations, dtype=np.int32)
+    return meta_data
+
+
+def load_pitch_meta_data(metafile_path) -> Dict:
+    """Load pitch meta data file."""
+    with open(metafile_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    meta_data = dict()
+    for line in lines:
+        utt_name, pitch_str = line.split("|")
+        pitch = [ float(D.strip()) for D in pitch_str.split(",") ]
+        meta_data[utt_name] = np.array(pitch, dtype=np.int32)
     return meta_data
 
 

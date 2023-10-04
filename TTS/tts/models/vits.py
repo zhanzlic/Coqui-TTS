@@ -1,10 +1,10 @@
 import math
 import os
+import numpy as np
 from dataclasses import dataclass, field, replace
 from itertools import chain
-from typing import Dict, List, Tuple, Union
+from typing import Callable, Dict, List, Tuple, Union
 
-import numpy as np
 import torch
 import torch.distributed as dist
 import torchaudio
@@ -21,6 +21,7 @@ from trainer.trainer_utils import get_optimizer, get_scheduler
 from TTS.tts.configs.shared_configs import CharactersConfig
 from TTS.tts.datasets.dataset import TTSDataset, _parse_sample
 from TTS.tts.layers.glow_tts.duration_predictor import DurationPredictor
+from TTS.tts.layers.feed_forward.decoder import Decoder as ForwardDecoder
 from TTS.tts.layers.vits.discriminator import VitsDiscriminator
 from TTS.tts.layers.vits.networks import PosteriorEncoder, ResidualCouplingBlocks, TextEncoder
 from TTS.tts.layers.vits.stochastic_duration_predictor import StochasticDurationPredictor
@@ -289,6 +290,10 @@ class VitsDataset(TTSDataset):
         if "duration" in item:
             output_item["duration"] = item["duration"]
 
+        # ZHa: pitch
+        if "pitch" in item:
+            output_item["pitch"] = item["pitch"]
+
         return output_item
 
     @property
@@ -402,6 +407,15 @@ class VitsDataset(TTSDataset):
             if "attn" not in output_batch:
                 attn_batch = [ self.duration_to_attn_matrix(torch.LongTensor(batch["duration"][i])) for i in range(B) ]
                 output_batch["attn"] = self.pad_attn_batch(attn_batch)
+
+        # ZHa: pad pitch vectors
+        if "pitch" in batch:
+            pitch_padded = torch.FloatTensor(B, token_lens_max)
+            pitch_padded = pitch_padded.zero_()
+            for i in range(B):
+                pitch_padded[i, : batch["token_len"][i]] = torch.FloatTensor(batch["pitch"][i])
+
+            output_batch["pitch"] = pitch_padded
 
         return output_batch
 
@@ -587,7 +601,21 @@ class VitsArgs(Coqpit):
             will be used to upsampling the latent variable z with the sampling rate `encoder_sample_rate`
             to the `config.audio.sample_rate`. If it is False you will need to add extra
             `upsample_rates_decoder` to match the shape. Defaults to True.
+            
+        use_pitch_predictor (bool):
+            Use pitch predictor to learn the pitch. Defaults to False.
 
+        pitch_predictor_hidden_channels (int):
+            Number of hidden channels in the pitch predictor. Defaults to 256.
+
+        pitch_predictor_dropout_p (float):
+            Dropout rate for the pitch predictor. Defaults to 0.1.
+
+        pitch_predictor_kernel_size (int):
+            Kernel size of conv layers in the pitch predictor. Defaults to 3.
+
+        pitch_embedding_kernel_size (int):
+            Kernel size of the projection layer in the pitch predictor. Defaults to 3.
     """
 
     num_chars: int = 100
@@ -648,6 +676,29 @@ class VitsArgs(Coqpit):
     reinit_DP: bool = False
     reinit_text_encoder: bool = False
 
+    # pitch predictor
+    use_pitch_predictor: bool = False
+    pitch_predictor_hidden_channels: int = 256
+    pitch_predictor_kernel_size: int = 3
+    pitch_predictor_dropout_p: float = 0.1
+    pitch_embedding_kernel_size: int = 3
+    #detach_pp_input: bool = False
+    #use_precomputed_alignments: bool = False
+    #alignments_cache_path: str = ""
+    #pitch_mean: float = 0.0
+    #pitch_std: float = 0.0
+
+    use_encoder_conditional_module: bool = False
+    conditional_module_type: str = "fftransformer"
+    conditional_module_params: dict = field(
+        default_factory=lambda: {"hidden_channels_ffn": 1024, "num_heads": 2, "num_layers": 3, "dropout_p": 0.1}
+    )
+
+    use_z_decoder: bool = False
+    z_decoder_type: str = "fftransformer"
+    z_decoder_params: dict = field(
+        default_factory=lambda: {"hidden_channels_ffn": 1024, "num_heads": 1, "num_layers": 6, "dropout_p": 0.1}
+    )
 
 class Vits(BaseTTS):
     """VITS TTS model
@@ -747,6 +798,43 @@ class Vits(BaseTTS):
                 3,
                 self.args.dropout_p_duration_predictor,
                 cond_channels=self.embedded_speaker_dim,
+                language_emb_dim=self.embedded_language_dim,
+            )
+
+        if self.args.use_z_decoder:
+            self.z_decoder = ForwardDecoder(
+                self.args.hidden_channels,
+                self.args.hidden_channels + self.cond_embedding_dim,
+                self.args.z_decoder_type,
+                self.args.z_decoder_params,
+            )
+
+        if self.args.use_encoder_conditional_module:
+            self.encoder_conditional_module = ForwardDecoder(
+                self.args.hidden_channels,
+                self.args.hidden_channels,
+                self.args.conditional_module_type,
+                self.args.conditional_module_params,
+            )
+
+        if self.args.use_pitch_predictor:
+            if not (self.args.use_encoder_conditional_module or self.args.use_z_decoder):
+                raise RuntimeError(
+                    f" [!] use_pitch True is useless when use_encoder_conditional_module and use_z_decoder is False. Please active on of this conditional modules !!"
+                )
+
+            self.pitch_emb = nn.Conv1d(
+                1,
+                self.args.hidden_channels,
+                kernel_size=self.args.pitch_predictor_kernel_size,
+                padding=int((self.args.pitch_predictor_kernel_size - 1) / 2),
+            )
+            self.pitch_predictor = DurationPredictor(
+                self.args.hidden_channels,
+                self.args.pitch_predictor_hidden_channels,
+                self.args.pitch_predictor_kernel_size,
+                self.args.pitch_predictor_dropout_p,
+                cond_channels=self.cond_embedding_dim,
                 language_emb_dim=self.embedded_language_dim,
             )
 
@@ -922,11 +1010,13 @@ class Vits(BaseTTS):
     @staticmethod
     def _set_cond_input(aux_input: Dict):
         """Set the speaker conditioning input based on the multi-speaker mode."""
-        sid, g, lid, durations = None, None, None, None
+        sid, g, lid, durations, pitch = None, None, None, None, None
+
         if "speaker_ids" in aux_input and aux_input["speaker_ids"] is not None:
             sid = aux_input["speaker_ids"]
             if sid.ndim == 0:
                 sid = sid.unsqueeze_(0)
+        
         if "d_vectors" in aux_input and aux_input["d_vectors"] is not None:
             g = F.normalize(aux_input["d_vectors"]).unsqueeze(-1)
             if g.ndim == 2:
@@ -942,7 +1032,13 @@ class Vits(BaseTTS):
             if durations.ndim == 2:
                 durations = durations.unsqueeze_(1)
 
-        return sid, g, lid, durations
+        if "pitch" in aux_input and aux_input["pitch"] is not None:
+            pitch = aux_input["pitch"]
+            if pitch.ndim == 2:
+                pitch = pitch.unsqueeze_(1)
+
+        return sid, g, lid, durations, pitch
+
 
     def _set_speaker_input(self, aux_input: Dict):
         d_vectors = aux_input.get("d_vectors", None)
@@ -956,6 +1052,63 @@ class Vits(BaseTTS):
 
         g = speaker_ids if speaker_ids is not None else d_vectors
         return g
+    
+
+    def forward_pitch_predictor(
+        self,
+        o_en: torch.FloatTensor,
+        x_lengths: torch.IntTensor,
+        gt_pitch: torch.FloatTensor = None,
+        #dr: torch.IntTensor = None,
+        g_pp: torch.IntTensor = None,
+        #pitch_transform: Callable=None,
+    ) -> Tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:
+        """Pitch predictor forward pass.
+
+        1. Predict pitch from encoder outputs.
+        2. In training - Compute average pitch values for each input character from the ground truth pitch values.
+        3. Embed average pitch values.
+
+        Args:
+            o_en (torch.FloatTensor): Encoder output.
+            x_mask (torch.IntTensor): Input sequence mask.
+            pitch (torch.FloatTensor, optional): Ground truth pitch values. Defaults to None.
+            ## dr (torch.IntTensor, optional): Ground truth durations. Defaults to None.
+            g_pp (torch.IntTensor, optional): Speaker/prosody embedding to condition the pitch predictor. Defaults to None.
+            ## pitch_transform (Callable, optional): Pitch transform function. Defaults to None.
+
+        Returns:
+            Tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]: Pitch loss, pitch embedding, pitch prediction.
+
+        Shapes:
+            - o_en: :math:`(B, C, T_{en})`
+            - x_mask: :math:`(B, 1, T_{en})`
+            - pitch: :math:`(B, 1, T_{de})`
+            - dr: :math:`(B, T_{en})`
+        """
+
+        x_mask = torch.unsqueeze(sequence_mask(x_lengths, o_en.size(2)), 1).to(o_en.dtype)  # [b, 1, t]
+
+        pred_pitch = self.pitch_predictor(
+            o_en, 
+            x_mask,
+            g=g_pp.detach() if self.args.detach_pp_input and g_pp is not None else g_pp
+        )
+
+        #if pitch_transform is not None:
+        #    pred_avg_pitch = pitch_transform(pred_avg_pitch, x_mask.sum(dim=(1,2)), self.args.pitch_mean, self.args.pitch_std)
+
+        pred_pitch_emb = self.pitch_emb(pred_pitch)
+        
+        if gt_pitch is not None:
+            # gt_avg_pitch = average_over_durations(pitch, dr.squeeze()).detach()  # it will be actually given as avg per unit
+            pitch_loss = torch.sum(torch.sum((gt_pitch - pred_pitch) ** 2, [1, 2]) / torch.sum(x_mask))
+            gt_pitch_emb = self.pitch_emb(gt_pitch)
+        else:
+            pitch_loss = None
+            gt_pitch_emb = None
+
+        return pitch_loss, gt_pitch_emb, pred_pitch_emb
 
 
     def get_duration_loss(self, durations, x, x_mask, g, lang_emb):
@@ -1014,6 +1167,7 @@ class Vits(BaseTTS):
 
         return z, spec_segment_size, slice_ids, y_mask
 
+
     def forward(  # pylint: disable=dangerous-default-value
         self,
         x: torch.tensor,
@@ -1060,7 +1214,8 @@ class Vits(BaseTTS):
             - gt_spk_emb: :math:`[B, 1, speaker_encoder.proj_dim]`
             - syn_spk_emb: :math:`[B, 1, speaker_encoder.proj_dim]`
         """
-        sid, g, lid, dur = self._set_cond_input(aux_input)
+
+        sid, g, lid, dur, pitch = self._set_cond_input(aux_input)
 
         # speaker embedding
         if self.args.use_speaker_embedding and sid is not None:
@@ -1092,6 +1247,27 @@ class Vits(BaseTTS):
         # expand prior
         m_p = torch.einsum("klmn, kjm -> kjn", [attn, m_p])
         logs_p = torch.einsum("klmn, kjm -> kjn", [attn, logs_p])
+
+        # pitch predictor
+        if self.args.use_pitch:
+            loss_pitch, gt_pitch_emb, _ = self.forward_pitch_predictor(x, x_lengths, pitch, g)
+            x = x + gt_pitch_emb
+        else:
+            loss_pitch = None
+            gt_pitch_emb = None
+
+        # z decoder
+        if self.args.use_z_decoder:
+            dec_input = torch.einsum("klmn, kjm -> kjn", [attn, x])
+            # add speaker emb
+            if g is not None:
+                dec_input = torch.cat((dec_input, g.expand(-1, -1, dec_input.size(2))), dim=1)
+
+            # decoder pass
+            z_decoder = self.z_decoder(dec_input, y_mask, g=None)
+            loss_z_decoder = torch.nn.functional.l1_loss(z_decoder * y_mask, z)
+        else:
+            loss_z_decoder = None
 
         # select a random feature segment for the waveform decoder
         z_slice, slice_ids = rand_segments(z, y_lengths, self.spec_segment_size, let_short_samples=True, pad_short=True)
@@ -1128,6 +1304,8 @@ class Vits(BaseTTS):
             "model_outputs": o,
             "alignments": attn.squeeze(1),
             "loss_duration": loss_duration,
+            "loss_pitch": loss_pitch,
+            "loss_z_decoder": loss_z_decoder,
             "m_p": m_p,
             "logs_p": logs_p,
             "z": z,
@@ -1186,7 +1364,8 @@ class Vits(BaseTTS):
                    "speaker_ids": None,
                    "language_ids": None,
                    "durations": None,
-                   "min_input_length": 0    # JMa: set minimum length if predicted length is lower than `min_input_length`
+                   "min_input_length": 0,    # JMa: set minimum length if predicted length is lower than `min_input_length`
+                   "pitch": None
                   },
     ):  # pylint: disable=dangerous-default-value
         """
@@ -1212,7 +1391,7 @@ class Vits(BaseTTS):
         # JMa: Save input
         x_input = x
 
-        sid, g, lid, durations = self._set_cond_input(aux_input)
+        sid, g, lid, durations, pitch = self._set_cond_input(aux_input)
         x_lengths = self._set_x_lengths(x, aux_input)
 
         # speaker embedding
@@ -1272,11 +1451,31 @@ class Vits(BaseTTS):
         attn_mask = x_mask * y_mask.transpose(1, 2)  # [B, 1, T_enc] * [B, T_dec, 1]
         attn = generate_path(w_ceil.squeeze(1), attn_mask.squeeze(1).transpose(1, 2))
 
+
+        pred_avg_pitch_emb = None
+        if self.args.use_pitch:
+            _, _, pred_avg_pitch_emb = self.forward_pitch_predictor(x, x_lengths, g_pp=g)
+            x = x + pred_avg_pitch_emb
+
+        if self.args.use_encoder_conditional_module:
+            m_p = self.encoder_conditional_module(x, x_mask)
+
         m_p = torch.matmul(attn.transpose(1, 2), m_p.transpose(1, 2)).transpose(1, 2)
         logs_p = torch.matmul(attn.transpose(1, 2), logs_p.transpose(1, 2)).transpose(1, 2)
 
         z_p = m_p + torch.randn_like(m_p) * torch.exp(logs_p) * self.inference_noise_scale
-        z = self.flow(z_p, y_mask, g=g, reverse=True)
+
+        if self.args.use_z_decoder:
+            dec_input = torch.matmul(attn.transpose(1, 2), x.transpose(1, 2)).transpose(1, 2)
+
+            # add speaker emb
+            if g is not None:
+                dec_input = torch.cat((dec_input, g.expand(-1, -1, dec_input.size(2))), dim=1)
+
+            # decoder pass
+            z = self.z_decoder(dec_input, y_mask, g=None)
+        else:
+            z = self.flow(z_p, y_mask, g=g, reverse=True)
 
         # upsampling if needed
         z, _, _, y_mask = self.upsampling_z(z, y_lengths=y_lengths, y_mask=y_mask)
@@ -1292,6 +1491,7 @@ class Vits(BaseTTS):
             "m_p": m_p,
             "logs_p": logs_p,
             "y_mask": y_mask,
+            "pitch": pred_avg_pitch_emb
         }
         return outputs
 
@@ -1378,7 +1578,8 @@ class Vits(BaseTTS):
                 "speaker_ids": speaker_ids,
                 "language_ids": language_ids,
                 "attn": batch.get("attn", None),
-                "durations": batch.get("duration", None)
+                "durations": batch.get("duration", None),
+                "pitch": batch.get("pitch", None)
             }
 
             # generator pass
