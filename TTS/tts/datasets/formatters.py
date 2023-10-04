@@ -13,6 +13,45 @@ from tqdm import tqdm
 ########################
 
 
+def cml_tts(root_path, meta_file, ignored_speakers=None):
+    """Normalizes the CML-TTS meta data file to TTS format
+    https://github.com/freds0/CML-TTS-Dataset/"""
+    filepath = os.path.join(root_path, meta_file)
+    # ensure there are 4 columns for every line
+    with open(filepath, "r", encoding="utf8") as f:
+        lines = f.readlines()
+    num_cols = len(lines[0].split("|"))  # take the first row as reference
+    for idx, line in enumerate(lines[1:]):
+        if len(line.split("|")) != num_cols:
+            print(f" > Missing column in line {idx + 1} -> {line.strip()}")
+    # load metadata
+    metadata = pd.read_csv(os.path.join(root_path, meta_file), sep="|")
+    assert all(x in metadata.columns for x in ["wav_filename", "transcript"])
+    client_id = None if "client_id" in metadata.columns else "default"
+    emotion_name = None if "emotion_name" in metadata.columns else "neutral"
+    items = []
+    not_found_counter = 0
+    for row in metadata.itertuples():
+        if client_id is None and ignored_speakers is not None and row.client_id in ignored_speakers:
+            continue
+        audio_path = os.path.join(root_path, row.wav_filename)
+        if not os.path.exists(audio_path):
+            not_found_counter += 1
+            continue
+        items.append(
+            {
+                "text": row.transcript,
+                "audio_file": audio_path,
+                "speaker_name": client_id if client_id is not None else row.client_id,
+                "emotion_name": emotion_name if emotion_name is not None else row.emotion_name,
+                "root_path": root_path,
+            }
+        )
+    if not_found_counter > 0:
+        print(f" | > [!] {not_found_counter} files not found")
+    return items
+
+
 def coqui(root_path, meta_file, ignored_speakers=None):
     """Interal dataset formatter."""
     filepath = os.path.join(root_path, meta_file)
@@ -403,6 +442,54 @@ def vctk(root_path, meta_files=None, wavs_path="wav48_silence_trimmed", mic="mic
     return items
 
 
+# JMa: VCTK with wav files (not flac)
+def vctk_wav(root_path, meta_files=None, wavs_path="wav48_silence_trimmed", mic="mic1", ignored_speakers=None):
+    """VCTK dataset v0.92.
+
+    URL:
+        https://datashare.ed.ac.uk/bitstream/handle/10283/3443/VCTK-Corpus-0.92.zip
+
+    This dataset has 2 recordings per speaker that are annotated with ```mic1``` and ```mic2```.
+    It is believed that (😄 ) ```mic1``` files are the same as the previous version of the dataset.
+
+    mic1:
+        Audio recorded using an omni-directional microphone (DPA 4035).
+        Contains very low frequency noises.
+        This is the same audio released in previous versions of VCTK:
+        https://doi.org/10.7488/ds/1994
+
+    mic2:
+        Audio recorded using a small diaphragm condenser microphone with
+        very wide bandwidth (Sennheiser MKH 800).
+        Two speakers, p280 and p315 had technical issues of the audio
+        recordings using MKH 800.
+    """
+    file_ext = "wav"
+    items = []
+    meta_files = glob(f"{os.path.join(root_path,'txt')}/**/*.txt", recursive=True)
+    for meta_file in meta_files:
+        _, speaker_id, txt_file = os.path.relpath(meta_file, root_path).split(os.sep)
+        file_id = txt_file.split(".")[0]
+        # ignore speakers
+        if isinstance(ignored_speakers, list):
+            if speaker_id in ignored_speakers:
+                continue
+        with open(meta_file, "r", encoding="utf-8") as file_text:
+            text = file_text.readlines()[0]
+        # p280 has no mic2 recordings
+        if speaker_id == "p280":
+            wav_file = os.path.join(root_path, wavs_path, speaker_id, file_id + f"_mic1.{file_ext}")
+        else:
+            wav_file = os.path.join(root_path, wavs_path, speaker_id, file_id + f"_{mic}.{file_ext}")
+        if os.path.exists(wav_file):
+            items.append(
+                {"text": text, "audio_file": wav_file, "speaker_name": "VCTK_" + speaker_id, "root_path": root_path}
+            )
+        else:
+            print(f" [!] wav files don't exist - {wav_file}")
+    return items
+
+
 def vctk_old(root_path, meta_files=None, wavs_path="wav48", ignored_speakers=None):
     """homepages.inf.ed.ac.uk/jyamagis/release/VCTK-Corpus.tar.gz"""
     items = []
@@ -604,11 +691,14 @@ def artic(root_path, meta_file, **kwargs):  # pylint: disable=unused-argument
     items = []
     # Speaker name is the name of the directory with the data (last part of `root_path`)
     speaker_name = os.path.basename(os.path.normpath(root_path))
-    # Speaker name can consists of language code (eg. cs-CZ) and gender (m/f) separated by dots
-    # Example: AndJa.cs-CZ.m
-    parts = speaker_name.split(".")
-    lang = parts[1] if len(parts) == 3 and "-" in parts[1] else None
-    print(f" > ARTIC dataset: voice {parts[0]}, language {lang}")
+    # Speaker name can consists of language code (eg. cs-CZ or en) and gender (m/f) separated by dots
+    # Example: AndJa.cs-CZ.m, LJS.en.f
+    try:
+        voice, lang, sex = speaker_name.split(".")
+    except ValueError:
+        voice = speaker_name
+        lang, sex = None, None
+    print(f" > ARTIC dataset: voice={voice}, sex={sex}, language={lang}")
     with open(txt_file, "r", encoding="utf-8") as ttf:
         for line in ttf:
             # Check the number of standard separators
@@ -626,39 +716,6 @@ def artic(root_path, meta_file, **kwargs):  # pylint: disable=unused-argument
             items.append({"utt_name": utt_name, "text": text, "audio_file": wav_file, "speaker_name": speaker_name, "language": lang, "root_path": root_path})
     return items
 
-
-def artic_ipa(root_path, meta_file, **kwargs):  # pylint: disable=unused-argument
-    """Normalizes the ARTIC meta data file to TTS format
-    
-    Args:
-        root_path (str): path to the artic dataset
-        meta_file (str): name of the meta file containing names of wav to select and
-                         transcripts of the corresponding utterances
-    
-    Returns:
-        List[Dict[str]]: List of (utt_name, text, wav_path, speaker_name, language, root_path) associated with each utterance
-    """
-    txt_file = os.path.join(root_path, meta_file)
-    items = []
-    # Speaker name is the name of the directory with the data (last part of `root_path`)
-    speaker_name = os.path.basename(os.path.normpath(root_path))
-    # Speaker name can consists of language code (eg. cs-CZ) and gender (m/f) separated by dots
-    # Example: AndJa.cs-CZ.m
-    parts = speaker_name.split(".")
-    lang = parts[1] if len(parts) == 3 and "-" in parts[1] else None
-    print(f" > ARTIC dataset: voice {parts[0]}, language {lang}")
-    with open(txt_file, "r", encoding="utf-8") as ttf:
-        for line in ttf:
-            # Split according to standard separator
-            cols = line.strip().split("|", maxsplit=1)
-            # utterance name is stored in `cols[0]` and text in `cols[1]`
-            utt_name = cols[0]
-            wav_file = os.path.join(root_path, "wavs", utt_name + ".wav")
-            text = cols[1]
-            items.append({"utt_name": utt_name, "text": text, "audio_file": wav_file, "speaker_name": speaker_name, "language": lang, "root_path": root_path})
-    return items
-
-
 def artic_multispeaker(root_path, meta_file, ignored_speakers=None): # pylint: disable=unused-argument
     """Normalizes the ARTIC multi-speaker meta data files to TTS format
 
@@ -674,7 +731,7 @@ def artic_multispeaker(root_path, meta_file, ignored_speakers=None): # pylint: d
     """
     items = []
     # Loop over speakers: speaker names are subdirs of `root_path`
-    for pth in glob(f"{root_path}/*", recursive=False):
+    for pth in glob(f"{root_path}/*/", recursive=False):
         speaker_name = os.path.basename(pth)
         # Ignore speakers
         if isinstance(ignored_speakers, list):

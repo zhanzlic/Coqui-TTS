@@ -1378,7 +1378,7 @@ class Vits(BaseTTS):
             - d_vectors: :math:`[B, C]`
             - speaker_ids: :math:`[B]`
             - durations: :math: `[B, T_seq]`
-            - length_scale: :math: `[B, T_seq]` or `[B]`
+            - length_scale: :math: `[B, T_seq]` or `[B]` 
 
         Return Shapes:
             - model_outputs: :math:`[B, 1, T_wav]`
@@ -1953,7 +1953,8 @@ class Vits(BaseTTS):
             dataset.preprocess_samples()
 
             # get samplers
-            sampler = self.get_sampler(config, dataset, num_gpus)
+            # JMa: Add `is_eval` parameter because the default is `False` and `batch_size` was used instead of `eval_batch_size`
+            sampler = self.get_sampler(config, dataset, num_gpus, is_eval)
             if sampler is None:
                 loader = DataLoader(
                     dataset,
