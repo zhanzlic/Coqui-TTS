@@ -357,7 +357,7 @@ class VitsDataset(TTSDataset):
         wav_lens = [w.shape[1] for w in batch["wav"]]
         wav_lens = torch.LongTensor(wav_lens)
         wav_lens_max = torch.max(wav_lens)
-        wav_rel_lens = wav_lens / wav_lens_max
+        #wav_rel_lens = wav_lens / wav_lens_max
 
         token_padded = torch.LongTensor(B, token_lens_max)
         wav_padded = torch.FloatTensor(B, 1, wav_lens_max)
@@ -377,7 +377,7 @@ class VitsDataset(TTSDataset):
             "token_rel_lens": token_rel_lens,
             "waveform": wav_padded,  # (B x T)
             "waveform_lens": wav_lens,  # (B)
-            "waveform_rel_lens": wav_rel_lens,
+            #"waveform_rel_lens": wav_rel_lens,
             "speaker_names": batch["speaker_name"],
             "language_names": batch["language_name"],
             "audio_files": batch["wav_file"],

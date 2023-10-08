@@ -702,10 +702,9 @@ def artic(root_path, meta_file, **kwargs):  # pylint: disable=unused-argument
     with open(txt_file, "r", encoding="utf-8") as ttf:
         for line in ttf:
             # Check the number of standard separators
-            n_seps = line.count("|")
-            if n_seps > 0:
+            if "|" in line:
                 # Split according to standard separator
-                cols = line.split("|")
+                cols = line.split("|", maxsplit=1)
             else:
                 # Assume ARTIC SNT format => wav name is delimited by the first space
                 cols = line.split(maxsplit=1)
