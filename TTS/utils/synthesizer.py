@@ -225,7 +225,7 @@ class Synthesizer(nn.Module):
             self.vocoder_model.cuda()
 
     def split_into_sentences(self, text) -> List[str]:
-        """Split give text into sentences.
+        """Split given text into sentences.
 
         Args:
             text (str): input text in string format.
@@ -234,18 +234,18 @@ class Synthesizer(nn.Module):
             List[str]: list of sentences.
         """
         # JMa
-        if "!" in self.tts_config.characters.characters:
+        if self.tts_config.characters.characters and "!" in self.tts_config.characters.characters:
             # Our proprietary phonetic mode enabled: the input text is assumed
             # to be a sequence of phones plus punctuations (without "!") and pauses (#, $).
             # (!) is a regular character, not a punctuation
-            # WA: Glottal stop [!] is temporarily replaced with [*] to prevent
+            # WA: Glottal stop [!] is temporarily replaced with [^] to prevent
             # boundary detection.
             #
             # Example: "!ahoj, !adame." -> ["!ahoj, !", "adame."]
             # Fix:     "!ahoj, !adame." -> ["!ahoj, !adame."]
-            text = text.replace("!", "*")
+            text = text.replace("!", "^")
             sents = self.seg.segment(text)
-            return [s.replace("*", "!") for s in sents]
+            return [s.replace("^", "!") for s in sents]
         else: # Original code
             return self.seg.segment(text)
 
