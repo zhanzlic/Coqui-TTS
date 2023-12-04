@@ -278,6 +278,7 @@ class Synthesizer(nn.Module):
         style_text=None,
         reference_wav=None,
         reference_speaker_name=None,
+        split_sentences: bool = True,
         **kwargs,
     ) -> List[int]:
         """🐸 TTS magic. Run all the models and generate speech.
@@ -291,6 +292,8 @@ class Synthesizer(nn.Module):
             style_text ([type], optional): transcription of style_wav for Capacitron. Defaults to None.
             reference_wav ([type], optional): reference waveform for voice conversion. Defaults to None.
             reference_speaker_name ([type], optional): speaker id of reference waveform. Defaults to None.
+            split_sentences (bool, optional): split the input text into sentences. Defaults to True.
+            **kwargs: additional arguments to pass to the TTS model.
         Returns:
             List[int]: [description]
         """
@@ -303,8 +306,10 @@ class Synthesizer(nn.Module):
             )
 
         if text:
-            sens = self.split_into_sentences(text)
-            print(" > Text splitted to sentences.")
+            sens = [text]
+            if split_sentences:
+                print(" > Text splitted to sentences.")
+                sens = self.split_into_sentences(text)
             print(sens)
 
         # handle multi-speaker

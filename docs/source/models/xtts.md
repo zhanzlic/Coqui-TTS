@@ -39,6 +39,10 @@ You can also mail us at info@coqui.ai.
 #### 🐸TTS API
 
 ##### Single reference
+
+Splits the text into sentences and generates audio for each sentence. The audio files are then concatenated to produce the final audio.
+You can optionally disable sentence splitting for better coherence but more VRAM and possibly hitting models context length limit.
+
 ```python
 from TTS.api import TTS
 tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2", gpu=True)
@@ -47,19 +51,70 @@ tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2", gpu=True)
 tts.tts_to_file(text="It took me quite a long time to develop a voice, and now that I have it I'm not going to be silent.",
                 file_path="output.wav",
                 speaker_wav=["/path/to/target/speaker.wav"],
-                language="en")
+                language="en",
+                split_sentences=True
+                )
 ```
 
 ##### Multiple references
+
+You can pass multiple audio files to the `speaker_wav` argument for better voice cloning.
+
 ```python
 from TTS.api import TTS
+
+# using the default version set in 🐸TTS
 tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2", gpu=True)
+
+# using a specific version
+# 👀 see the branch names for versions on https://huggingface.co/coqui/XTTS-v2/tree/main
+# ❗some versions might be incompatible with the API
+tts = TTS("xtts_v2.0.2", gpu=True)
+
+# getting the latest XTTS_v2
+tts = TTS("xtts", gpu=True)
 
 # generate speech by cloning a voice using default settings
 tts.tts_to_file(text="It took me quite a long time to develop a voice, and now that I have it I'm not going to be silent.",
                 file_path="output.wav",
                 speaker_wav=["/path/to/target/speaker.wav", "/path/to/target/speaker_2.wav", "/path/to/target/speaker_3.wav"],
                 language="en")
+```
+
+##### Streaming inference
+
+XTTS supports streaming inference. This is useful for real-time applications.
+
+```python
+import os
+import time
+import torch
+import torchaudio
+
+print("Loading model...")
+tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2", gpu=True)
+model = tts.synthesizer.tts_model
+
+print("Computing speaker latents...")
+gpt_cond_latent, speaker_embedding = model.get_conditioning_latents(audio_path=["reference.wav"])
+
+print("Inference...")
+t0 = time.time()
+stream_generator = model.inference_stream(
+    "It took me quite a long time to develop a voice and now that I have it I am not going to be silent.",
+    "en",
+    gpt_cond_latent,
+    speaker_embedding
+)
+
+wav_chuncks = []
+for i, chunk in enumerate(stream_generator):
+    if i == 0:
+        print(f"Time to first chunck: {time.time() - t0}")
+    print(f"Received chunk {i} of audio length {chunk.shape[-1]}")
+    wav_chuncks.append(chunk)
+wav = torch.cat(wav_chuncks, dim=0)
+torchaudio.save("xtts_streaming.wav", wav.squeeze().unsqueeze(0).cpu(), 24000)
 ```
 
 #### 🐸TTS Command line
@@ -91,10 +146,13 @@ or for all wav files in a directory you can use:
      --use_cuda true
 ```
 
+#### 🐸TTS Model API
 
-#### model directly
+To use the model API, you need to download the model files and pass config and model file paths manually.
 
-If you want to be able to run with `use_deepspeed=True` and enjoy the speedup, you need to install deepspeed first.
+##### Calling manually
+
+If you want to be able to run with `use_deepspeed=True` and **enjoy the speedup**, you need to install deepspeed first.
 
 ```console
 pip install deepspeed==0.10.3
@@ -129,7 +187,7 @@ torchaudio.save("xtts.wav", torch.tensor(out["wav"]).unsqueeze(0), 24000)
 ```
 
 
-#### streaming inference
+##### Streaming manually
 
 Here the goal is to stream the audio as it is being generated. This is useful for real-time applications.
 Streaming inference is typically slower than regular inference, but it allows to get a first chunk of audio faster.
@@ -174,6 +232,50 @@ torchaudio.save("xtts_streaming.wav", wav.squeeze().unsqueeze(0).cpu(), 24000)
 
 
 ### Training
+
+#### Easy training
+To make `XTTS_v2` GPT encoder training easier for beginner users we did a gradio demo that implements the whole fine-tuning pipeline. The gradio demo enables the user to easily do the following steps:
+
+- Preprocessing of the uploaded audio or audio files in 🐸 TTS coqui formatter
+- Train the XTTS GPT encoder with the processed data
+- Inference support using the fine-tuned model
+
+The user can run this gradio demo locally or remotely using a Colab Notebook.
+
+##### Run demo on Colab
+To make the `XTTS_v2` fine-tuning more accessible for users that do not have good GPUs available we did a Google Colab Notebook.
+
+The Colab Notebook is available [here](https://colab.research.google.com/drive/1GiI4_X724M8q2W-zZ-jXo7cWTV7RfaH-?usp=sharing).
+
+To learn how to use this Colab Notebook please check the [XTTS fine-tuning video]().
+
+If you are not able to acess the video you need to follow the steps:
+
+1. Open the Colab notebook and start the demo by runining the first two cells (ignore pip install errors in the first one).
+2. Click on the link "Running on public URL:" on the second cell output.
+3. On the first Tab (1 - Data processing) you need to select the audio file or files, wait for upload, and then click on the button "Step 1 - Create dataset" and then wait until the dataset processing is done.
+4. Soon as the dataset processing is done you need to go to the second Tab (2 - Fine-tuning XTTS Encoder) and press the button "Step 2 - Run the training" and then wait until the training is finished. Note that it can take up to 40 minutes.
+5. Soon the training is done you can go to the third Tab (3 - Inference) and then click on the button "Step 3 - Load Fine-tuned XTTS model" and wait until the fine-tuned model is loaded. Then you can do the inference on the model by clicking on the button "Step 4 - Inference".
+
+
+##### Run demo locally
+
+To run the demo locally you need to do the following steps:
+1. Install   🐸 TTS following the instructions available [here](https://tts.readthedocs.io/en/dev/installation.html#installation).
+2. Install the Gradio demo requirements with the command `python3 -m pip install -r TTS/demos/xtts_ft_demo/requirements.txt`
+3. Run the Gradio demo using the command `python3 TTS/demos/xtts_ft_demo/xtts_demo.py`
+4. Follow the steps presented in the [tutorial video](https://www.youtube.com/watch?v=8tpDiiouGxc&feature=youtu.be) to be able to fine-tune and test the fine-tuned model.
+
+
+If you are not able to access the video, here is what you need to do:
+
+1. On the first Tab (1 - Data processing) select the audio file or files, wait for upload
+2. Click on the button "Step 1 - Create dataset" and then wait until the dataset processing is done.
+3. Go to the second Tab (2 - Fine-tuning XTTS Encoder) and press the button "Step 2 - Run the training" and then wait until the training is finished. it will take some time.
+4. Go to the third Tab (3 - Inference) and then click on the button "Step 3 - Load Fine-tuned XTTS model" and wait until the fine-tuned model is loaded.
+5. Now you can run inference with the model by clicking on the button "Step 4 - Inference".
+
+#### Advanced training
 
 A recipe for `XTTS_v2` GPT encoder training using `LJSpeech` dataset is available at https://github.com/coqui-ai/TTS/tree/dev/recipes/ljspeech/xtts_v1/train_gpt_xtts.py
 
@@ -220,6 +322,7 @@ out = model.inference(
 )
 torchaudio.save(OUTPUT_WAV_PATH, torch.tensor(out["wav"]).unsqueeze(0), 24000)
 ```
+
 
 
 ## References and Acknowledgements
