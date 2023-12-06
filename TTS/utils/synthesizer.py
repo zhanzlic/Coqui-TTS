@@ -225,7 +225,7 @@ class Synthesizer(nn.Module):
             self.vocoder_model.cuda()
 
     def split_into_sentences(self, text) -> List[str]:
-        """Split give text into sentences.
+        """Split given text into sentences.
 
         Args:
             text (str): input text in string format.
@@ -234,22 +234,22 @@ class Synthesizer(nn.Module):
             List[str]: list of sentences.
         """
         # JMa
-        if "!" in self.tts_config.characters.characters:
+        if self.tts_config.characters.characters and "!" in self.tts_config.characters.characters:
             # Our proprietary phonetic mode enabled: the input text is assumed
             # to be a sequence of phones plus punctuations (without "!") and pauses (#, $).
             # (!) is a regular character, not a punctuation
-            # WA: Glottal stop [!] is temporarily replaced with [*] to prevent
+            # WA: Glottal stop [!] is temporarily replaced with [^] to prevent
             # boundary detection.
             #
             # Example: "!ahoj, !adame." -> ["!ahoj, !", "adame."]
             # Fix:     "!ahoj, !adame." -> ["!ahoj, !adame."]
-            text = text.replace("!", "*")
+            text = text.replace("!", "^")
             sents = self.seg.segment(text)
-            return [s.replace("*", "!") for s in sents]
+            return [s.replace("^", "!") for s in sents]
         else: # Original code
             return self.seg.segment(text)
 
-    def save_wav(self, wav: List[int], path: str, pipe_out = None) -> None:
+    def save_wav(self, wav: List[int], path: str, pipe_out=None) -> None:
         """Save the waveform as a file.
 
         Args:
@@ -278,6 +278,7 @@ class Synthesizer(nn.Module):
         style_text=None,
         reference_wav=None,
         reference_speaker_name=None,
+        split_sentences: bool = True,
         **kwargs,
     ) -> List[int]:
         """🐸 TTS magic. Run all the models and generate speech.
@@ -291,6 +292,8 @@ class Synthesizer(nn.Module):
             style_text ([type], optional): transcription of style_wav for Capacitron. Defaults to None.
             reference_wav ([type], optional): reference waveform for voice conversion. Defaults to None.
             reference_speaker_name ([type], optional): speaker id of reference waveform. Defaults to None.
+            split_sentences (bool, optional): split the input text into sentences. Defaults to True.
+            **kwargs: additional arguments to pass to the TTS model.
         Returns:
             List[int]: [description]
         """
@@ -303,8 +306,10 @@ class Synthesizer(nn.Module):
             )
 
         if text:
-            sens = self.split_into_sentences(text)
-            print(" > Text splitted to sentences.")
+            sens = [text]
+            if split_sentences:
+                print(" > Text splitted to sentences.")
+                sens = self.split_into_sentences(text)
             print(sens)
 
         # handle multi-speaker
@@ -372,7 +377,11 @@ class Synthesizer(nn.Module):
                 )
 
         # compute a new d_vector from the given clip.
-        if speaker_wav is not None and self.tts_model.speaker_manager is not None:
+        if (
+            speaker_wav is not None
+            and self.tts_model.speaker_manager is not None
+            and self.tts_model.speaker_manager.encoder_ap is not None
+        ):
             speaker_embedding = self.tts_model.speaker_manager.compute_embedding_from_clip(speaker_wav)
 
         vocoder_device = "cpu"

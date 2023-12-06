@@ -227,7 +227,7 @@ def main():
     parser.add_argument(
         "--cs_model",
         type=str,
-        help="Name of the 🐸Coqui Studio model. Available models are `XTTS`, `XTTS-multilingual`, `V1`.",
+        help="Name of the 🐸Coqui Studio model. Available models are `XTTS`, `V1`.",
     )
     parser.add_argument(
         "--emotion",
@@ -238,7 +238,7 @@ def main():
     parser.add_argument(
         "--language",
         type=str,
-        help="Language to condition the model with. Only available for 🐸Coqui Studio `XTTS-multilingual` model.",
+        help="Language to condition the model with. Only available for 🐸Coqui Studio `XTTS` model.",
         default=None,
     )
     parser.add_argument(
@@ -419,6 +419,13 @@ def main():
             print(" > Saving output to ", args.out_path)
             return
 
+        if args.language_idx is None and args.language is not None:
+            msg = (
+                "--language is only supported for Coqui Studio models. "
+                "Use --language_idx to specify the target language for multilingual models."
+            )
+            raise ValueError(msg)
+
         # CASE4: load pre-trained model paths
         if args.model_name is not None and not args.model_path:
             model_path, config_path, model_item = manager.download_model(args.model_name)
@@ -427,7 +434,9 @@ def main():
                 tts_path = model_path
                 tts_config_path = config_path
                 if "default_vocoder" in model_item:
-                    args.vocoder_name = model_item["default_vocoder"] if args.vocoder_name is None else args.vocoder_name
+                    args.vocoder_name = (
+                        model_item["default_vocoder"] if args.vocoder_name is None else args.vocoder_name
+                    )
 
             # voice conversion model
             if model_item["model_type"] == "voice_conversion_models":
