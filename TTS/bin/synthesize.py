@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import argparse
+import contextlib
 import sys
 from argparse import RawTextHelpFormatter
 
@@ -57,6 +58,12 @@ If you don't specify any models, then it uses LJSpeech based English model.
 
   ```
   $ tts --text "Text for TTS" --out_path output/path/speech.wav
+  ```
+
+- Run TTS and pipe out the generated TTS wav file data:
+
+  ```
+  $ tts --text "Text for TTS" --pipe_out --out_path output/path/speech.wav | aplay
   ```
 
 - Run a TTS model with its default vocoder model:
@@ -209,26 +216,15 @@ def main():
         default=None,
     )
     parser.add_argument("--encoder_config_path", type=str, help="Path to speaker encoder config file.", default=None)
-
-    # args for coqui studio
     parser.add_argument(
-        "--cs_model",
-        type=str,
-        help="Name of the 🐸Coqui Studio model. Available models are `XTTS`, `XTTS-multilingual`, `V1`.",
+        "--pipe_out",
+        help="stdout the generated TTS wav file for shell pipe.",
+        type=str2bool,
+        nargs="?",
+        const=True,
+        default=False,
     )
-    parser.add_argument(
-        "--emotion",
-        type=str,
-        help="Emotion to condition the model with. Only available for 🐸Coqui Studio `V1` model.",
-        default=None,
-    )
-    parser.add_argument(
-        "--language",
-        type=str,
-        help="Language to condition the model with. Only available for 🐸Coqui Studio `XTTS-multilingual` model.",
-        default=None,
-    )
-
+    
     # args for multi-speaker synthesis
     parser.add_argument("--speakers_file_path", type=str, help="JSON file for multi-speaker model.", default=None)
     parser.add_argument("--language_ids_file_path", type=str, help="JSON file for multi-lingual model.", default=None)
@@ -335,167 +331,163 @@ def main():
     if not any(check_args):
         parser.parse_args(["-h"])
 
-    # Late-import to make things load faster
-    from TTS.api import TTS
-    from TTS.utils.manage import ModelManager
-    from TTS.utils.synthesizer import Synthesizer
+    pipe_out = sys.stdout if args.pipe_out else None
 
-    # load model manager
-    path = Path(__file__).parent / "../.models.json"
-    manager = ModelManager(path, progress_bar=args.progress_bar)
-    api = TTS()
+    with contextlib.redirect_stdout(None if args.pipe_out else sys.stdout):
+        # Late-import to make things load faster
+        from TTS.api import TTS
+        from TTS.utils.manage import ModelManager
+        from TTS.utils.synthesizer import Synthesizer
 
-    tts_path = None
-    tts_config_path = None
-    speakers_file_path = None
-    language_ids_file_path = None
-    vocoder_path = None
-    vocoder_config_path = None
-    encoder_path = None
-    encoder_config_path = None
-    vc_path = None
-    vc_config_path = None
-    model_dir = None
+        # load model manager
+        path = Path(__file__).parent / "../.models.json"
+        manager = ModelManager(path, progress_bar=args.progress_bar)
+        api = TTS()
 
-    # CASE1 #list : list pre-trained TTS models
-    if args.list_models:
-        manager.add_cs_api_models(api.list_models())
-        manager.list_models()
-        sys.exit()
+        tts_path = None
+        tts_config_path = None
+        speakers_file_path = None
+        language_ids_file_path = None
+        vocoder_path = None
+        vocoder_config_path = None
+        encoder_path = None
+        encoder_config_path = None
+        vc_path = None
+        vc_config_path = None
+        model_dir = None
 
-    # CASE2 #info : model info for pre-trained TTS models
-    if args.model_info_by_idx:
-        model_query = args.model_info_by_idx
-        manager.model_info_by_idx(model_query)
-        sys.exit()
+        # CASE1 #list : list pre-trained TTS models
+        if args.list_models:
+            manager.list_models()
+            sys.exit()
 
-    if args.model_info_by_name:
-        model_query_full_name = args.model_info_by_name
-        manager.model_info_by_full_name(model_query_full_name)
-        sys.exit()
+        # CASE2 #info : model info for pre-trained TTS models
+        if args.model_info_by_idx:
+            model_query = args.model_info_by_idx
+            manager.model_info_by_idx(model_query)
+            sys.exit()
 
-    # CASE3: TTS with coqui studio models
-    if "coqui_studio" in args.model_name:
-        print(" > Using 🐸Coqui Studio model: ", args.model_name)
-        api = TTS(model_name=args.model_name, cs_api_model=args.cs_model)
-        api.tts_to_file(text=args.text, emotion=args.emotion, file_path=args.out_path, language=args.language)
-        print(" > Saving output to ", args.out_path)
-        return
+        if args.model_info_by_name:
+            model_query_full_name = args.model_info_by_name
+            manager.model_info_by_full_name(model_query_full_name)
+            sys.exit()
 
-    # CASE4: load pre-trained model paths
-    if args.model_name is not None and not args.model_path:
-        model_path, config_path, model_item = manager.download_model(args.model_name)
-        # tts model
-        if model_item["model_type"] == "tts_models":
-            tts_path = model_path
-            tts_config_path = config_path
-            if "default_vocoder" in model_item:
-                args.vocoder_name = model_item["default_vocoder"] if args.vocoder_name is None else args.vocoder_name
+        # CASE3: load pre-trained model paths
+        if args.model_name is not None and not args.model_path:
+            model_path, config_path, model_item = manager.download_model(args.model_name)
+            # tts model
+            if model_item["model_type"] == "tts_models":
+                tts_path = model_path
+                tts_config_path = config_path
+                if "default_vocoder" in model_item:
+                    args.vocoder_name = (
+                        model_item["default_vocoder"] if args.vocoder_name is None else args.vocoder_name
+                    )
 
-        # voice conversion model
-        if model_item["model_type"] == "voice_conversion_models":
-            vc_path = model_path
-            vc_config_path = config_path
+            # voice conversion model
+            if model_item["model_type"] == "voice_conversion_models":
+                vc_path = model_path
+                vc_config_path = config_path
 
-        # tts model with multiple files to be loaded from the directory path
-        if model_item.get("author", None) == "fairseq" or isinstance(model_item["model_url"], list):
-            model_dir = model_path
-            tts_path = None
-            tts_config_path = None
-            args.vocoder_name = None
+            # tts model with multiple files to be loaded from the directory path
+            if model_item.get("author", None) == "fairseq" or isinstance(model_item["model_url"], list):
+                model_dir = model_path
+                tts_path = None
+                tts_config_path = None
+                args.vocoder_name = None
 
-    # load vocoder
-    if args.vocoder_name is not None and not args.vocoder_path:
-        vocoder_path, vocoder_config_path, _ = manager.download_model(args.vocoder_name)
+        # load vocoder
+        if args.vocoder_name is not None and not args.vocoder_path:
+            vocoder_path, vocoder_config_path, _ = manager.download_model(args.vocoder_name)
 
-    # CASE5: set custom model paths
-    if args.model_path is not None:
-        tts_path = args.model_path
-        tts_config_path = args.config_path
-        speakers_file_path = args.speakers_file_path
-        language_ids_file_path = args.language_ids_file_path
+        # CASE4: set custom model paths
+        if args.model_path is not None:
+            tts_path = args.model_path
+            tts_config_path = args.config_path
+            speakers_file_path = args.speakers_file_path
+            language_ids_file_path = args.language_ids_file_path
 
-    if args.vocoder_path is not None:
-        vocoder_path = args.vocoder_path
-        vocoder_config_path = args.vocoder_config_path
+        if args.vocoder_path is not None:
+            vocoder_path = args.vocoder_path
+            vocoder_config_path = args.vocoder_config_path
 
-    if args.encoder_path is not None:
-        encoder_path = args.encoder_path
-        encoder_config_path = args.encoder_config_path
+        if args.encoder_path is not None:
+            encoder_path = args.encoder_path
+            encoder_config_path = args.encoder_config_path
 
-    device = args.device
-    if args.use_cuda:
-        device = "cuda"
+        device = args.device
+        if args.use_cuda:
+            device = "cuda"
 
-    # load models
-    synthesizer = Synthesizer(
-        tts_path,
-        tts_config_path,
-        speakers_file_path,
-        language_ids_file_path,
-        vocoder_path,
-        vocoder_config_path,
-        encoder_path,
-        encoder_config_path,
-        vc_path,
-        vc_config_path,
-        model_dir,
-        args.voice_dir,
-    ).to(device)
+        # load models
+        synthesizer = Synthesizer(
+            tts_path,
+            tts_config_path,
+            speakers_file_path,
+            language_ids_file_path,
+            vocoder_path,
+            vocoder_config_path,
+            encoder_path,
+            encoder_config_path,
+            vc_path,
+            vc_config_path,
+            model_dir,
+            args.voice_dir,
+        ).to(device)
 
-    # query speaker ids of a multi-speaker model.
-    if args.list_speaker_idxs:
-        print(
-            " > Available speaker ids: (Set --speaker_idx flag to one of these values to use the multi-speaker model."
-        )
-        print(synthesizer.tts_model.speaker_manager.name_to_id)
-        return
+        # query speaker ids of a multi-speaker model.
+        if args.list_speaker_idxs:
+            print(
+                " > Available speaker ids: (Set --speaker_idx flag to one of these values to use the multi-speaker model."
+            )
+            print(synthesizer.tts_model.speaker_manager.name_to_id)
+            return
 
-    # query langauge ids of a multi-lingual model.
-    if args.list_language_idxs:
-        print(
-            " > Available language ids: (Set --language_idx flag to one of these values to use the multi-lingual model."
-        )
-        print(synthesizer.tts_model.language_manager.name_to_id)
-        return
+        # query langauge ids of a multi-lingual model.
+        if args.list_language_idxs:
+            print(
+                " > Available language ids: (Set --language_idx flag to one of these values to use the multi-lingual model."
+            )
+            print(synthesizer.tts_model.language_manager.name_to_id)
+            return
 
-    # check the arguments against a multi-speaker model.
-    if synthesizer.tts_speakers_file and (not args.speaker_idx and not args.speaker_wav):
-        print(
-            " [!] Looks like you use a multi-speaker model. Define `--speaker_idx` to "
-            "select the target speaker. You can list the available speakers for this model by `--list_speaker_idxs`."
-        )
-        return
+        # check the arguments against a multi-speaker model.
+        if synthesizer.tts_speakers_file and (not args.speaker_idx and not args.speaker_wav):
+            print(
+                " [!] Looks like you use a multi-speaker model. Define `--speaker_idx` to "
+                "select the target speaker. You can list the available speakers for this model by `--list_speaker_idxs`."
+            )
+            return
 
-    # RUN THE SYNTHESIS
-    if args.text:
-        print(" > Text: {}".format(args.text))
+        # RUN THE SYNTHESIS
+        if args.text:
+            print(" > Text: {}".format(args.text))
 
-    # kick it
-    if tts_path is not None:
-        wav = synthesizer.tts(
-            args.text,
-            speaker_name=args.speaker_idx,
-            language_name=args.language_idx,
-            speaker_wav=args.speaker_wav,
-            reference_wav=args.reference_wav,
-            style_wav=args.capacitron_style_wav,
-            style_text=args.capacitron_style_text,
-            reference_speaker_name=args.reference_speaker_idx,
-        )
-    elif vc_path is not None:
-        wav = synthesizer.voice_conversion(
-            source_wav=args.source_wav,
-            target_wav=args.target_wav,
-        )
-    elif model_dir is not None:
-        wav = synthesizer.tts(
-            args.text, speaker_name=args.speaker_idx, language_name=args.language_idx, speaker_wav=args.speaker_wav
-        )
+        # kick it
+        if tts_path is not None:
+            wav = synthesizer.tts(
+                args.text,
+                speaker_name=args.speaker_idx,
+                language_name=args.language_idx,
+                speaker_wav=args.speaker_wav,
+                reference_wav=args.reference_wav,
+                style_wav=args.capacitron_style_wav,
+                style_text=args.capacitron_style_text,
+                reference_speaker_name=args.reference_speaker_idx,
+            )
+        elif vc_path is not None:
+            wav = synthesizer.voice_conversion(
+                source_wav=args.source_wav,
+                target_wav=args.target_wav,
+            )
+        elif model_dir is not None:
+            wav = synthesizer.tts(
+                args.text, speaker_name=args.speaker_idx, language_name=args.language_idx, speaker_wav=args.speaker_wav
+            )
 
-    # save the results
-    print(" > Saving output to {}".format(args.out_path))
-    synthesizer.save_wav(wav, args.out_path)
+        # save the results
+        print(" > Saving output to {}".format(args.out_path))
+        synthesizer.save_wav(wav, args.out_path, pipe_out=pipe_out)
 
 
 if __name__ == "__main__":
